@@ -1,10 +1,12 @@
 """End-to-end tests for the API, driven through TestClient (no server needed)."""
 
+import json
+
 import pytest
 from fastapi.testclient import TestClient
 
 from diabetes.api import app
-from diabetes.api.service import PROJECT_PATH
+from diabetes.api.service import PROJECT_PATH, read_dataset
 
 PATIENT = {
     "Pregnancies": 1,
@@ -145,3 +147,45 @@ class TestTrainingRuns:
         assert response.status_code == HTTP_ACCEPTED
         assert response.json()["pipelines"] == ["inference"]
         worker.assert_called_once()
+
+
+class TestDatasets:
+    def test_predictions_serve_the_catalog_dataset(self, client):
+        """Same content as the file the inference pipeline wrote."""
+        path = PROJECT_PATH / "data" / "07_model_output" / "inference_predictions.json"
+        on_disk = json.loads(path.read_text())
+
+        response = client.get("/predictions")
+
+        assert response.status_code == HTTP_OK
+        body = response.json()
+        assert body["n"] == len(on_disk)
+        assert body["predictions"] == on_disk
+
+    def test_metrics_cover_every_split(self, client):
+        response = client.get("/metrics/optimized")
+
+        assert response.status_code == HTTP_OK
+        body = response.json()
+        assert set(body) == {"train", "test", "validate"}
+        cm = body["validate"]["confusion_matrix"]
+        assert (
+            cm["tn"] + cm["fp"] + cm["fn"] + cm["tp"] == body["validate"]["n_samples"]
+        )
+
+    def test_unknown_model_is_rejected(self, client):
+        response = client.get("/metrics/xgboost")
+
+        assert response.status_code == HTTP_UNPROCESSABLE
+
+    def test_dataset_not_written_yet_is_404(self, client, mocker):
+        mocker.patch("diabetes.api.main.read_dataset", return_value=None)
+
+        response = client.get("/predictions")
+
+        assert response.status_code == HTTP_NOT_FOUND
+
+    def test_only_whitelisted_datasets_are_served(self):
+        """Pickled models and patient-level tables must never leave the server."""
+        with pytest.raises(ValueError, match="not exposed"):
+            read_dataset("production_model")

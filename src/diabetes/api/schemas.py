@@ -60,6 +60,27 @@ class InferenceResponse(BaseModel):
     predictions: list[Prediction]
 
 
+class ConfusionMatrix(BaseModel):
+    tn: int
+    fp: int
+    fn: int = Field(description="Diabetic patients the model did not flag.")
+    tp: int
+
+
+class SplitMetrics(BaseModel):
+    """One split of ``baseline_metrics`` / ``optimized_metrics``."""
+
+    threshold: float = Field(description="decision.threshold used for the labels.")
+    accuracy: float
+    roc_auc: float
+    f1_macro: float
+    recall: float
+    precision: float
+    confusion_matrix: ConfusionMatrix
+    classification_report: dict[str, Any]
+    n_samples: int
+
+
 class RunStartedResponse(BaseModel):
     run_id: str
     status: Literal["running"]

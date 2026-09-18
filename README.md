@@ -2,6 +2,8 @@
 
 [![Powered by Kedro](https://img.shields.io/badge/powered_by-kedro-ffc900?logo=kedro)](https://kedro.org)
 
+**Autor:** Luiz Felipe Possebon, exercício de avaliação da disciplina de Deploy (Insper PADS, 3º trimestre).
+
 Este projeto transforma o notebook `diabetes-prediction.ipynb` em pipelines Kedro reprodutíveis. Ele segue a mesma arquitetura do projeto de churn da aula: 4 pipelines, uma API FastAPI e um container Docker.
 
 A base é a *Pima Indians Diabetes* do Kaggle. Cada linha é uma paciente com 21 anos ou mais, e o alvo é `Outcome` (1 = diabetes).
@@ -101,6 +103,8 @@ A documentação interativa fica em `/docs`.
 | `GET` | `/train/{run_id}` | `running` / `completed` / `failed` |
 | `POST` | `/inference` | Scoring síncrono a partir de JSON, sem escrever nada em disco |
 | `POST` | `/batch-inference` | Roda o pipeline de inferência sobre o arquivo do catálogo, em background |
+| `GET` | `/predictions` | Devolve o dataset `inference_predictions` do último batch, lido pelo catálogo |
+| `GET` | `/metrics/{baseline\|optimized}` | Devolve o dataset de métricas do modelo, por split |
 
 ```bash
 curl -s localhost:8000/health
@@ -110,9 +114,14 @@ curl -s -X POST localhost:8000/inference \
   -d '{"instances":[{"Pregnancies":6,"Glucose":148,"BloodPressure":72,
        "SkinThickness":35,"Insulin":0,"BMI":33.6,
        "DiabetesPedigreeFunction":0.627,"Age":50}]}'
+
+curl -s localhost:8000/predictions            # dataset gerado pelo pipeline de inferência
+curl -s localhost:8000/metrics/optimized      # métricas por split, no corte de negócio
 ```
 
 Um campo ausente, ou um zero em uma medida clínica, é imputado com a mediana de produção.
+
+As rotas `/predictions` e `/metrics` só leem, e passam pelo catálogo Kedro, nunca pelo caminho do arquivo. O formato e a localização continuam definidos no `catalog.yml`. Elas atendem apenas a uma lista fechada de datasets (`inference_predictions`, `baseline_metrics` e `optimized_metrics`). Modelos em pickle e tabelas intermediárias com dados de pacientes nunca saem pela API.
 
 Dois pontos de design vêm do projeto de churn:
 - Todos os handlers usam `def`, nunca `async def`, para que o trabalho pesado de CPU do Kedro rode no thread pool.
@@ -134,7 +143,7 @@ docker compose down
 ## Testes
 
 ```bash
-uv run pytest               # 42 testes: nós, DAG e API (~91% de cobertura)
+uv run pytest               # 47 testes: nós, DAG e API (~91% de cobertura)
 uv run ruff check src tests
 ```
 

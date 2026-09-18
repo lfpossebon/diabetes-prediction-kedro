@@ -96,6 +96,33 @@ def production_artefacts_available() -> bool:
     return all((models_dir / name).exists() for name in PRODUCTION_ARTEFACTS)
 
 
+# ------------------------------------------------------- read-only datasets
+
+# Catalog datasets the API may serve. A whitelist, never the catalog as a
+# whole: it also holds pickled models and intermediate patient-level tables.
+EXPOSED_DATASETS = frozenset(
+    {"inference_predictions", "baseline_metrics", "optimized_metrics"}
+)
+
+
+def read_dataset(name: str) -> Any | None:
+    """Load a whitelisted catalog dataset, or ``None`` if no run has written it yet.
+
+    Goes through the catalog instead of opening the file, so where the dataset
+    lives and in which format stays a ``catalog.yml`` concern — exactly as it
+    is for the pipelines.
+    """
+    if name not in EXPOSED_DATASETS:
+        raise ValueError(f"Dataset not exposed by the API: {name}")
+
+    ensure_bootstrap()
+    with KedroSession.create(project_path=PROJECT_PATH) as session:
+        catalog = session.load_context().catalog
+        if not catalog.exists(name):
+            return None
+        return catalog.load(name)
+
+
 # --------------------------------------------------------------- run registry
 
 
