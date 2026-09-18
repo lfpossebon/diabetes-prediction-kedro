@@ -1,0 +1,97 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+requires-python = ">=3.10"
+name = "diabetes"
+readme = "README.md"
+dynamic = ["version"]
+dependencies = [
+    "kedro~=1.6.0",
+    "kedro-datasets>=9.6.0",
+    "scikit-learn>=1.7.2",
+    "fastapi>=0.141.1",
+    "uvicorn[standard]>=0.53.0",
+]
+
+[project.scripts]
+"diabetes" = "diabetes.__main__:main"
+
+[project.entry-points."kedro.hooks"]
+
+[project.optional-dependencies]
+docs = [
+    "docutils<0.21",
+    "sphinx>=5.3,<7.3",
+    "sphinx_rtd_theme==2.0.0",
+    "nbsphinx==0.8.1",
+    "sphinx-autodoc-typehints==1.20.2",
+    "sphinx_copybutton==0.5.2",
+    "ipykernel>=5.3, <7.0",
+    "Jinja2<3.2.0",
+    "myst-parser>=1.0,<2.1"
+]
+
+[tool.setuptools.dynamic]
+version = {attr = "diabetes.__version__"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+namespaces = false
+
+[tool.kedro]
+package_name = "diabetes"
+project_name = "diabetes"
+kedro_init_version = "1.6.0"
+tools = "['Linting', 'Testing', 'Custom Logging', 'Documentation', 'Data Structure']"
+example_pipeline = "False"
+source_dir = "src"
+
+[tool.pytest.ini_options]
+# src/ on the path explicitly: on macOS, uv writes the editable-install .pth
+# files with the UF_HIDDEN flag, and Python 3.14 skips hidden .pth files, so the
+# editable install can silently stop working after any `uv sync`.
+# Fix the flag with: chflags nohidden .venv/lib/python*/site-packages/*.pth
+pythonpath = ["src"]
+addopts = """
+--cov-report term-missing \
+--cov src/diabetes -ra"""
+
+[tool.coverage.report]
+fail_under = 0
+show_missing = true
+exclude_lines = ["pragma: no cover", "raise NotImplementedError"]
+
+[tool.ruff.format]
+docstring-code-format = true
+
+[tool.ruff]
+line-length = 88
+show-fixes = true
+
+[tool.ruff.lint]
+select = [
+    "F",   # Pyflakes
+    "W",   # pycodestyle
+    "E",   # pycodestyle
+    "I",   # isort
+    "UP",  # pyupgrade
+    "PL",  # Pylint
+    "T201", # Print Statement
+]
+ignore = ["E501"]  # Ruff format takes care of line-too-long
+
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+    "ipython>=8.39.0",
+    "jupyterlab>=4.6.3",
+    "kedro-viz>=12.4.0",
+    "notebook>=7.6.2",
+    "pytest~=7.2",
+    "pytest-cov>=3,<7",
+    "pytest-mock>=1.7.1,<2.0",
+    "ruff~=0.12.0",
+]

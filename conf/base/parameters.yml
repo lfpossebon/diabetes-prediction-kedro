@@ -1,0 +1,137 @@
+# Every column list, split proportion, threshold and hyperparameter lives here.
+# Changing the model, the grid or the feature set never requires touching src/.
+
+# Column groups, referenced by group key throughout the pipelines.
+columns:
+  target: Outcome
+  # The eight clinical measurements exactly as they arrive in the raw CSV.
+  raw:
+    - Pregnancies
+    - Glucose
+    - BloodPressure
+    - SkinThickness
+    - Insulin
+    - BMI
+    - DiabetesPedigreeFunction
+    - Age
+  # A zero here is physiologically impossible: it is how the dataset encodes
+  # "not measured". Pregnancies = 0 is a real value and stays out of this list.
+  zero_as_missing:
+    - Glucose
+    - BloodPressure
+    - SkinThickness
+    - Insulin
+    - BMI
+  # Model features. The raw measurements plus the two interactions built by
+  # create_features, all of them scaled.
+  numerical:
+    - Pregnancies
+    - Glucose
+    - BloodPressure
+    - SkinThickness
+    - Insulin
+    - BMI
+    - DiabetesPedigreeFunction
+    - Age
+    - GLUCOSE_X_INSULIN
+    - GLUCOSE_X_PREGNANCIES
+  # Categories built by create_features, all of them ordinal-encoded.
+  categorical:
+    - NEW_AGE_CAT
+    - NEW_BMI
+    - NEW_GLUCOSE
+    - NEW_AGE_BMI_NOM
+    - NEW_AGE_GLUCOSE_NOM
+    - NEW_INSULIN_SCORE
+
+split:
+  train: 0.7
+  test: 0.15
+  validate: 0.15
+  random_state: 42
+
+# Outlier thresholds: the notebook's wide IQR, (q95 - q05) * 1.5 beyond each quantile.
+outliers:
+  q1: 0.05
+  q3: 0.95
+  iqr_factor: 1.5
+
+# Clinical cut-offs used by create_features. Upper bins are open-ended (1000),
+# so an out-of-range value sent to the API still lands in the last category.
+feature_engineering:
+  senior_age: 50
+  bmi:
+    bins: [0, 18.5, 24.9, 29.9, 1000]
+    labels: [Underweight, Healthy, Overweight, Obese]
+  glucose:
+    bins: [0, 140, 200, 1000]
+    labels: [Normal, Prediabetes, Diabetes]
+  # Fasting glucose levels, left-closed: [0, 70) low, [70, 100) normal ...
+  glucose_level:
+    bins: [0, 70, 100, 126, 1000]
+    labels: [low, normal, hidden, high]
+  insulin_normal_range: [16, 166]
+
+# --- data engineering: fit on the train split only, to avoid leakage -------
+modelling_imputers:
+  columns: [raw]
+  strategy: median
+  split_to_fit: [train]
+
+modelling_outlier_caps:
+  columns: [raw]
+  split_to_fit: [train]
+
+modelling_encoders:
+  columns: [categorical]
+  split_to_fit: [train]
+
+modelling_scalers:
+  columns: [numerical]
+  split_to_fit: [train]
+
+# --- modelling -------------------------------------------------------------
+modelling_baseline:
+  class_path: sklearn.linear_model.LogisticRegression
+  target_column: Outcome
+  train_splits: [train]
+  eval_splits: [train, test, validate]
+  init_args:
+    max_iter: 1000
+
+# The notebook's best model after tuning, with the notebook's grid. The search
+# runs on train + test; validate stays untouched for an honest final score.
+modelling_optimization:
+  class_path: sklearn.ensemble.RandomForestClassifier
+  target_column: Outcome
+  train_splits: [train, test]
+  eval_splits: [train, test, validate]
+  init_args:
+    random_state: 46
+  cv: 5
+  scoring: roc_auc
+  param_grid:
+    n_estimators: [100, 200, 300]
+    max_depth: [null, 5, 10]
+    min_samples_split: [2, 5, 10]
+
+# --- refit: same functions, every split, production artefacts --------------
+refit_imputers:
+  columns: [raw]
+  strategy: median
+  split_to_fit: [train, test, validate]
+
+refit_outlier_caps:
+  columns: [raw]
+  split_to_fit: [train, test, validate]
+
+refit_encoders:
+  columns: [categorical]
+  split_to_fit: [train, test, validate]
+
+refit_scalers:
+  columns: [numerical]
+  split_to_fit: [train, test, validate]
+
+refit_model:
+  train_splits: [train, test, validate]

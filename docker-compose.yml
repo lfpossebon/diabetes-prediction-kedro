@@ -1,0 +1,21 @@
+# Mount instead of bake: the image carries only code and dependencies, while
+# config and data come from the host. The same image then serves any
+# environment just by changing what is mounted — no rebuild.
+
+services:
+  api:
+    build: .
+    image: diabetes-api:latest
+    ports:
+      # HOST:CONTAINER — the host side defaults to 8000; if it is taken
+      # locally, run e.g. `API_PORT=8001 docker compose up`.
+      - "${API_PORT:-8000}:8000"
+    volumes:
+      # Read-only: the application reads configuration, it never rewrites it.
+      - ./conf:/app/conf:ro
+      # Read-write: the training pipelines produce artefacts here.
+      - ./data:/app/data
+    environment:
+      # Keep Python from buffering stdout, so `docker compose logs -f` is live.
+      PYTHONUNBUFFERED: "1"
+      DO_NOT_TRACK: "1"

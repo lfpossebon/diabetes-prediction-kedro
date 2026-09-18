@@ -1,0 +1,29 @@
+# Only what the build actually needs goes into the context. Everything here is
+# either rebuilt inside the image, mounted at runtime, or irrelevant to it.
+
+# The host venv would clash with the one the image builds for itself.
+.venv/
+venv/
+
+# Mounted as volumes at runtime, so they must not be baked in.
+data/
+conf/
+
+# Not needed to build or run the API.
+.git/
+.gitignore
+tests/
+notebooks/
+docs/
+build/
+.viz/
+
+# Build and editor noise.
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.coverage
+*.log
+.DS_Store
