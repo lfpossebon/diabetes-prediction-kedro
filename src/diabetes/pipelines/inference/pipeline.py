@@ -66,7 +66,7 @@ def create_pipeline(**kwargs) -> Pipeline:
             ),
             Node(
                 func=predict,
-                inputs=["production_model", "scaled_inference_data"],
+                inputs=["production_model", "scaled_inference_data", "params:decision"],
                 outputs="inference_predictions",
                 name="predict",
             ),

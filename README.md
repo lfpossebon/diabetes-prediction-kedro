@@ -52,19 +52,39 @@ O notebook ajustava tudo na base inteira **antes** do split, o que causava vazam
 - `NEW_INSULIN_SCORE`: `set_insulin` retornava `None` para valores normais. Agora retorna `Normal` entre 16 e 166 e `Abnormal` fora dessa faixa.
 - Métricas: o notebook chamava `metric(y_pred, y_test)` com os argumentos invertidos, o que trocava precision e recall. Também calculava o AUC a partir de rótulos. Agora é `metric(y_true, y_pred)`, e o AUC é calculado com `predict_proba`.
 
+### Parâmetros
+
+As decisões ficam em [`conf/base/parameters.yml`](conf/base/parameters.yml) e a mecânica fica no código, seguindo o padrão do projeto de churn. Cada nó recebe os parâmetros como entradas explícitas (`params:<bloco>`) e nunca lê a configuração por conta própria.
+
+| Bloco | O que decide |
+|---|---|
+| `columns` | Alvo, medidas brutas, colunas onde 0 significa ausente, features numéricas e categóricas |
+| `split` | Proporções de train/test/validate e semente |
+| `outliers`, `feature_engineering` | Quantis e fator do IQR, faixas clínicas de IMC, glicose, idade e insulina |
+| `modelling_*` / `refit_*` | Colunas de cada artefato e os splits usados no ajuste (`split_to_fit`) |
+| `modelling_baseline`, `modelling_optimization` | Modelo (`class_path`), `init_args`, grid, `cv`, `scoring`, `n_jobs` |
+| `decision` | **Corte de negócio**: uma paciente é sinalizada quando P(diabetes) ≥ `threshold` |
+
 ### Resultados
 
-Split aleatório de 70/15/15 com semente 42. O grid search roda em train + test, e o `validate` fica totalmente de fora.
+Split aleatório de 70/15/15 com semente 42. O grid search roda em train + test, e o `validate` fica totalmente de fora. O AUC não depende do corte; as demais métricas usam `decision.threshold = 0.35`.
 
-| Modelo | Split | Acurácia | ROC AUC | F1 macro |
-|---|---|---|---|---|
-| LogisticRegression (baseline) | validate | 0.824 | 0.888 | 0.801 |
-| RandomForest (otimizado) | validate | 0.835 | 0.878 | 0.818 |
-| RandomForest de produção (refit) | arquivo de inferência (116 linhas nunca vistas) | 0.759 | 0.826 | 0.744 |
+| Modelo | Dados | ROC AUC | Recall | Precisão | Não detectadas |
+|---|---|---|---|---|---|
+| LogisticRegression (baseline) | validate (91) | 0.888 | 0.77 | 0.71 | 7 de 31 |
+| RandomForest (otimizado) | validate (91) | 0.878 | 0.81 | 0.66 | 6 de 31 |
+| RandomForest de produção (refit) | arquivo de inferência (116 nunca vistas) | 0.826 | 0.85 | 0.60 | 6 de 40 |
 
 Melhores hiperparâmetros (CV com 5 folds, `roc_auc` = 0.834): `n_estimators=200`, `max_depth=10`, `min_samples_split=10`.
 
-Todos os valores estão em `data/08_reporting/*.json`. A última linha foi obtida comparando `inference_predictions.json` com o `Outcome` real do arquivo de inferência.
+Os valores das duas primeiras linhas, incluindo a matriz de confusão, estão em `data/08_reporting/*.json`. A última linha foi obtida comparando `inference_predictions.json` com o `Outcome` real do arquivo de inferência.
+
+**Por que 0.35 e não 0.5.** Deixar passar uma diabética custa muito mais do que um exame confirmatório a mais. O corte foi escolhido com predições out-of-fold só nos dados de modelagem, sem olhar o arquivo de inferência. Nas 116 pacientes nunca vistas, sair de 0.5 para 0.35 muda o seguinte:
+- Recall: 0.75 → 0.85.
+- Diabéticas não detectadas: 10 → 6.
+- Pacientes enviadas ao exame: 41% → 49%.
+
+Para mudar o equilíbrio entre casos perdidos e alarmes falsos, basta editar `decision.threshold`. O batch e a API passam a usar o novo corte sem mudança de código.
 
 ## API
 
@@ -114,7 +134,7 @@ docker compose down
 ## Testes
 
 ```bash
-uv run pytest               # 40 testes: nós, DAG e API (~91% de cobertura)
+uv run pytest               # 42 testes: nós, DAG e API (~91% de cobertura)
 uv run ruff check src tests
 ```
 

@@ -16,7 +16,10 @@ import pandas as pd
 from sklearn.metrics import (
     accuracy_score,
     classification_report,
+    confusion_matrix,
     f1_score,
+    precision_score,
+    recall_score,
     roc_auc_score,
 )
 from sklearn.model_selection import GridSearchCV
@@ -109,6 +112,7 @@ def optimize_hyperparameters(
             - ``param_grid`` (dict): Hyperparameter grid for ``GridSearchCV``.
             - ``cv`` (int): Number of cross-validation folds.
             - ``scoring`` (str): Scoring metric for the search.
+            - ``n_jobs`` (int): Parallel jobs for the search (-1 = all cores).
             - ``target_column`` (str): Name of the target column.
             - ``train_splits`` (list[str]): Split labels used for fitting.
             - ``eval_splits`` (list[str]): Split labels for evaluation.
@@ -133,7 +137,7 @@ def optimize_hyperparameters(
         param_grid=params["param_grid"],
         cv=params.get("cv", 5),
         scoring=params.get("scoring", "roc_auc"),
-        n_jobs=-1,
+        n_jobs=params.get("n_jobs", -1),
         verbose=0,
     )
     search.fit(X_train, y_train)
@@ -158,11 +162,17 @@ def optimize_hyperparameters(
 def evaluate_model(
     model_artifact: dict[str, Any],
     master_table: pd.DataFrame,
+    decision: dict[str, Any],
 ) -> dict[str, Any]:
     """Evaluate a fitted model on each split listed in the artifact.
 
     ``roc_auc`` is computed from predicted probabilities, not from predicted
     labels — using labels would silently understate the metric.
+
+    The label-based metrics use the business threshold from
+    ``params:decision`` instead of ``estimator.predict``, whose 0.5 cut-off is
+    arbitrary. They are therefore the numbers the inference pipeline will
+    actually deliver.
 
     Args:
         model_artifact: Dict produced by ``train_model`` or
@@ -170,16 +180,19 @@ def evaluate_model(
             ``target_column``, ``feature_columns``, and ``eval_splits``.
         master_table: Fully-processed DataFrame with a ``split`` column and
             all feature and target columns.
+        decision: Decision configuration with key ``threshold`` (float):
+            minimum positive-class probability to predict 1.
 
     Returns:
-        Dict keyed by split name. Each value contains ``accuracy``,
-        ``roc_auc``, ``f1_macro``, ``classification_report``,
-        and ``n_samples``.
+        Dict keyed by split name. Each value contains ``threshold``,
+        ``accuracy``, ``roc_auc``, ``f1_macro``, ``recall``, ``precision``,
+        ``confusion_matrix``, ``classification_report``, and ``n_samples``.
     """
     estimator = model_artifact["estimator"]
     target = model_artifact["target_column"]
     feature_cols = model_artifact["feature_columns"]
     eval_splits = model_artifact["eval_splits"]
+    threshold = decision["threshold"]
 
     all_metrics: dict[str, Any] = {}
 
@@ -188,25 +201,36 @@ def evaluate_model(
         X_split = split_df[feature_cols]
         y_split = split_df[target]
 
-        y_pred = estimator.predict(X_split)
         y_proba = estimator.predict_proba(X_split)[:, 1]
+        y_pred = (y_proba >= threshold).astype(int)
+        tn, fp, fn, tp = confusion_matrix(y_split, y_pred, labels=[0, 1]).ravel()
 
         split_metrics = {
+            "threshold": float(threshold),
             "accuracy": float(accuracy_score(y_split, y_pred)),
             "roc_auc": float(roc_auc_score(y_split, y_proba)),
             "f1_macro": float(f1_score(y_split, y_pred, average="macro")),
+            "recall": float(recall_score(y_split, y_pred, zero_division=0)),
+            "precision": float(precision_score(y_split, y_pred, zero_division=0)),
+            "confusion_matrix": {
+                "tn": int(tn),
+                "fp": int(fp),
+                "fn": int(fn),
+                "tp": int(tp),
+            },
             "classification_report": classification_report(
-                y_split, y_pred, output_dict=True
+                y_split, y_pred, output_dict=True, zero_division=0
             ),
             "n_samples": int(len(y_split)),
         }
 
         logger.info(
-            "Evaluation '%s' — accuracy: %.4f, roc_auc: %.4f, f1_macro: %.4f",
+            "Evaluation '%s' @ %.2f — roc_auc: %.4f, recall: %.4f, precision: %.4f",
             split_name,
-            split_metrics["accuracy"],
+            threshold,
             split_metrics["roc_auc"],
-            split_metrics["f1_macro"],
+            split_metrics["recall"],
+            split_metrics["precision"],
         )
 
         all_metrics[split_name] = split_metrics

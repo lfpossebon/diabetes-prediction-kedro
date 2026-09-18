@@ -20,7 +20,7 @@ def create_pipeline(**kwargs) -> Pipeline:
             ),
             Node(
                 func=evaluate_model,
-                inputs=["baseline_model", "master_table"],
+                inputs=["baseline_model", "master_table", "params:decision"],
                 outputs="baseline_metrics",
                 name="evaluate_baseline_model",
             ),
@@ -36,7 +36,7 @@ def create_pipeline(**kwargs) -> Pipeline:
             ),
             Node(
                 func=evaluate_model,
-                inputs=["optimized_model", "master_table"],
+                inputs=["optimized_model", "master_table", "params:decision"],
                 outputs="optimized_metrics",
                 name="evaluate_optimized_model",
             ),

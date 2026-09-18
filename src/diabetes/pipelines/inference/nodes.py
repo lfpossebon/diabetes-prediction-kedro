@@ -38,13 +38,21 @@ def to_dataframe(
 def predict(
     model_artifact: dict[str, Any],
     inference_data: pd.DataFrame,
+    decision: dict[str, Any],
 ) -> list[dict[str, Any]]:
     """Score a fully-processed DataFrame and return predictions with probabilities.
+
+    The 0/1 prediction applies the business threshold from ``params:decision``
+    rather than ``estimator.predict``, whose cut-off is a fixed 0.5. Changing
+    the trade-off between missed cases and false alarms is then a YAML change,
+    for batch and API alike.
 
     Args:
         model_artifact: Model artifact dict containing ``estimator`` and
             ``feature_columns`` keys.
         inference_data: Encoded and scaled DataFrame ready for scoring.
+        decision: Decision configuration with key ``threshold`` (float):
+            minimum positive-class probability to predict 1.
 
     Returns:
         List of dictionaries, each with ``index`` (int, row number),
@@ -55,8 +63,8 @@ def predict(
     feature_cols = model_artifact["feature_columns"]
 
     X = inference_data[feature_cols]
-    predictions = estimator.predict(X)
     probabilities = estimator.predict_proba(X)[:, 1]
+    predictions = (probabilities >= decision["threshold"]).astype(int)
 
     result = [
         {"index": idx, "prediction": int(p), "probability": float(prob)}

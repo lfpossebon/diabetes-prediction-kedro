@@ -40,11 +40,13 @@ BASELINE = {
     "init_args": {"max_iter": 1000},
 }
 
+DECISION = {"threshold": 0.5}
+
 
 def test_train_and_evaluate_every_split(master_table):
     artifact = train_model(master_table, COLUMNS, BASELINE)
 
-    metrics = evaluate_model(artifact, master_table)
+    metrics = evaluate_model(artifact, master_table, DECISION)
 
     assert set(metrics) == set(SPLITS)
     assert artifact["feature_columns"] == ["Glucose", "BMI", "NEW_BMI"]
@@ -60,13 +62,28 @@ def test_grid_search_returns_the_same_artifact_shape(master_table):
         "init_args": {"random_state": 0},
         "cv": 3,
         "scoring": "roc_auc",
+        "n_jobs": 1,
         "param_grid": {"n_estimators": [10], "max_depth": [None, 3]},
     }
 
     artifact = optimize_hyperparameters(master_table, COLUMNS, params)
 
     assert artifact["best_params"]["max_depth"] in (None, 3)
-    assert set(evaluate_model(artifact, master_table)) == set(SPLITS)
+    assert set(evaluate_model(artifact, master_table, DECISION)) == set(SPLITS)
+
+
+def test_lower_threshold_trades_precision_for_recall(master_table):
+    """The cut-off comes from params:decision, and every metric follows it."""
+    artifact = train_model(master_table, COLUMNS, BASELINE)
+
+    strict = evaluate_model(artifact, master_table, {"threshold": 0.8})["validate"]
+    lenient = evaluate_model(artifact, master_table, {"threshold": 0.2})["validate"]
+
+    assert lenient["threshold"] == pytest.approx(0.2)
+    assert lenient["recall"] > strict["recall"]
+    assert lenient["confusion_matrix"]["fn"] < strict["confusion_matrix"]["fn"]
+    cm = lenient["confusion_matrix"]
+    assert cm["tn"] + cm["fp"] + cm["fn"] + cm["tp"] == lenient["n_samples"]
 
 
 def test_refit_keeps_hyperparameters_and_uses_every_split(master_table):

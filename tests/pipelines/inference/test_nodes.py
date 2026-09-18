@@ -33,23 +33,35 @@ class TestToDataFrame:
         assert len(out) == len(records)
 
 
+DECISION = {"threshold": 0.5}
+
+
 class TestPredict:
     def test_returns_one_record_per_row_with_positive_class_probability(self):
         artifact = {"estimator": _StubEstimator(), "feature_columns": ["a"]}
         data = pd.DataFrame({"a": [1.0, 2.0], "ignored": [9, 9]})
 
-        out = predict(artifact, data)
+        out = predict(artifact, data, DECISION)
 
         assert out == [
             {"index": 0, "prediction": 0, "probability": 0.2},
             {"index": 1, "prediction": 1, "probability": 0.7},
         ]
 
+    def test_threshold_comes_from_parameters_not_the_estimator(self):
+        """Lowering the cut-off flags the 0.2 row that predict() at 0.5 would miss."""
+        artifact = {"estimator": _StubEstimator(), "feature_columns": ["a"]}
+        data = pd.DataFrame({"a": [1.0, 2.0]})
+
+        out = predict(artifact, data, {"threshold": 0.15})
+
+        assert [r["prediction"] for r in out] == [1, 1]
+
     def test_values_are_plain_python_types_for_json_serialization(self):
         artifact = {"estimator": _StubEstimator(), "feature_columns": ["a"]}
         data = pd.DataFrame({"a": [1.0, 2.0]})
 
-        out = predict(artifact, data)
+        out = predict(artifact, data, DECISION)
 
         assert all(type(r["prediction"]) is int for r in out)
         assert all(type(r["probability"]) is float for r in out)

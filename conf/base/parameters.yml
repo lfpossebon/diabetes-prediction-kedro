@@ -110,10 +110,20 @@ modelling_optimization:
     random_state: 46
   cv: 5
   scoring: roc_auc
+  n_jobs: -1  # parallel grid search; -1 = every core
   param_grid:
     n_estimators: [100, 200, 300]
     max_depth: [null, 5, 10]
     min_samples_split: [2, 5, 10]
+
+# --- decision: the business cut-off, shared by evaluation and inference ----
+# A patient is flagged (prediction = 1) when P(diabetes) >= threshold.
+# Missing a diabetic patient costs far more than one extra blood test, so the
+# cut-off sits below the default 0.5. Chosen from out-of-fold predictions on
+# the modelling data only: at 0.35 recall rises from 0.64 to 0.81 while about
+# half of the patients (46%) are sent to the confirmatory test.
+decision:
+  threshold: 0.35
 
 # --- refit: same functions, every split, production artefacts --------------
 refit_imputers:

@@ -45,7 +45,11 @@ class InferenceRequest(BaseModel):
 
 class Prediction(BaseModel):
     index: int
-    prediction: int = Field(description="1 = diabetes, 0 = no diabetes.")
+    prediction: int = Field(
+        description="1 = flagged for a confirmatory diabetes test, 0 = not flagged. "
+        "A patient is flagged when probability >= decision.threshold in "
+        "conf/base/parameters.yml."
+    )
     probability: float = Field(
         description="Probability of the positive (diabetes) class."
     )
