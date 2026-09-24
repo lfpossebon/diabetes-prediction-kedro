@@ -2,7 +2,9 @@
 then pick the champion that the refit pipeline promotes to production.
 
 The two training branches are independent — Kedro runs them in whatever order
-the DAG allows — and both feed the same ``evaluate_model`` function.
+the DAG allows — and both feed the same ``evaluate_model`` function. The
+champion is chosen from the two models' predictions on the holdout, not from
+their metrics files, because the comparison is a paired bootstrap.
 """
 
 from kedro.pipeline import Node, Pipeline
@@ -57,9 +59,8 @@ def create_pipeline(**kwargs) -> Pipeline:
                 func=select_champion,
                 inputs=[
                     "baseline_model",
-                    "baseline_metrics",
                     "optimized_model",
-                    "optimized_metrics",
+                    "master_table",
                     "params:champion_selection",
                 ],
                 outputs=["champion_model", "champion_report"],
@@ -70,7 +71,9 @@ def create_pipeline(**kwargs) -> Pipeline:
                 inputs=[
                     "champion_model",
                     "master_table",
+                    "split_diabetes_data",
                     "params:decision",
+                    "params:guideline_referral",
                     "params:threshold_analysis",
                 ],
                 outputs="threshold_curve",

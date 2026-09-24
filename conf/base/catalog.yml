@@ -265,3 +265,11 @@ threshold_curve:
   metadata:
     kedro-viz:
       layer: reporting
+
+production_odds_ratios:
+  type: json.JSONDataset
+  filepath: data/08_reporting/production_odds_ratios.json
+  versioned: true
+  metadata:
+    kedro-viz:
+      layer: reporting

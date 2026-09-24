@@ -38,6 +38,13 @@ from .service import (
 
 logger = logging.getLogger(__name__)
 
+# /reports/{report} -> catalog dataset.
+REPORT_DATASETS = {
+    "champion": "champion_report",
+    "threshold_curve": "threshold_curve",
+    "odds_ratios": "production_odds_ratios",
+}
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -52,7 +59,14 @@ def create_app() -> FastAPI:
         title="Diabetes API",
         version=__version__,
         description=(
-            "HTTP interface to the Kedro diabetes pipelines. Training runs in the "
+            "HTTP interface to the Kedro diabetes pipelines. The model estimates "
+            "the risk that a non-diabetic, non-pregnant woman aged 21-81, after "
+            "a 2-hour oral glucose tolerance test, develops diabetes within five "
+            "years. Every woman with impaired glucose tolerance is flagged, as "
+            "the guidelines refer her anyway. The model was developed on Pima "
+            "women (Arizona), whose incidence is far above most populations, so "
+            "its probability is an absolute risk only there; it has not been "
+            "externally validated and is not a diagnostic device. Training runs in the "
             "background; online scoring reuses the very same inference pipeline "
             "as the batch run, with the payload injected into the catalog. "
             "The datasets routes serve pipeline outputs read-only, straight "
@@ -149,10 +163,12 @@ def create_app() -> FastAPI:
         return data
 
     @app.get("/reports/{report}", response_model=dict[str, Any], tags=["datasets"])
-    def reports(report: Literal["champion", "threshold_curve"]) -> dict[str, Any]:
-        """Serve the model-selection report or the out-of-fold threshold curve."""
-        name = "champion_report" if report == "champion" else report
-        data = read_dataset(name)
+    def reports(
+        report: Literal["champion", "threshold_curve", "odds_ratios"],
+    ) -> dict[str, Any]:
+        """Serve the model-selection report, the out-of-fold decision analysis
+        or the production model's odds ratios."""
+        data = read_dataset(REPORT_DATASETS[report])
         if data is None:
             raise HTTPException(
                 status_code=404,

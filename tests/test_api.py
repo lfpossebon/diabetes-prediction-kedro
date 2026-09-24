@@ -8,14 +8,21 @@ from fastapi.testclient import TestClient
 from diabetes.api import app, service
 from diabetes.api.service import PROJECT_PATH, read_dataset
 
+ELIGIBLE = {
+    "Pregnant": False,
+    "KnownDiabetes": False,
+    "GlucoseAffectingMedication": False,
+}
+
 PATIENT = {
+    "Sex": "female",
+    **ELIGIBLE,
     "Pregnancies": 1,
     "Glucose": 89,
     "BloodPressure": 66,
     "SkinThickness": 23,
     "Insulin": 94,
     "BMI": 28.1,
-    "DiabetesPedigreeFunction": 0.167,
     "Age": 21,
 }
 
@@ -76,6 +83,8 @@ class TestOnlineInference:
         for item in body["predictions"]:
             assert item["prediction"] in (0, 1)
             assert 0.0 <= item["probability"] <= 1.0
+            assert item["decision_basis"] == "model"
+            assert item["criteria_met"] == []
 
     def test_identical_inputs_score_identically(self, client):
         """Cheap determinism check: no state leaks between rows or requests."""
@@ -95,6 +104,8 @@ class TestOnlineInference:
     def test_optional_fields_absent_null_or_zero_are_imputed(self, client):
         """Unmeasured values (absent, null or 0) are imputed, not rejected."""
         partial = {
+            "Sex": "female",
+            **ELIGIBLE,
             "Glucose": 120,
             "BMI": 30.5,
             "Age": 35,
@@ -116,8 +127,25 @@ class TestOnlineInference:
             pytest.param({**PATIENT, "Glucose": None}, id="required-null"),
             pytest.param({**PATIENT, "Glucose": -50}, id="negative"),
             pytest.param({**PATIENT, "BMI": 0}, id="required-zero"),
-            pytest.param({**PATIENT, "Age": 10}, id="outside-population"),
+            pytest.param({**PATIENT, "Age": 10}, id="below-training-ages"),
+            pytest.param({**PATIENT, "Age": 82}, id="above-training-ages"),
+            pytest.param({**PATIENT, "Sex": "male"}, id="not-a-woman"),
+            pytest.param(
+                {k: v for k, v in PATIENT.items() if k != "Sex"}, id="sex-missing"
+            ),
             pytest.param({**PATIENT, "Insulin": 5000}, id="implausible"),
+            pytest.param({**PATIENT, "HbA1c": 45}, id="hba1c-in-mmol-per-mol"),
+            pytest.param(
+                {**PATIENT, "DiabetesPedigreeFunction": 0.5},
+                id="pedigree-function-is-not-an-input",
+            ),
+            *(
+                pytest.param(
+                    {k: v for k, v in PATIENT.items() if k != field},
+                    id=f"{field}-unanswered",
+                )
+                for field in ELIGIBLE
+            ),
         ],
     )
     def test_invalid_patients_are_rejected(self, client, patient):
@@ -126,6 +154,70 @@ class TestOnlineInference:
         response = client.post("/inference", json={"instances": [patient]})
 
         assert response.status_code == HTTP_UNPROCESSABLE
+
+    @pytest.mark.parametrize(
+        ("field", "reason"),
+        [
+            ("Pregnant", "IADPSG"),
+            ("KnownDiabetes", "do not have it"),
+            ("GlucoseAffectingMedication", "glucocorticoids"),
+        ],
+    )
+    def test_patients_outside_the_model_population_are_rejected(
+        self, client, field, reason
+    ):
+        """The clinician gets the clinical reason, not just a type error."""
+        response = client.post(
+            "/inference", json={"instances": [{**PATIENT, field: True}]}
+        )
+
+        assert response.status_code == HTTP_UNPROCESSABLE
+        assert reason in response.text
+
+    @pytest.mark.parametrize(
+        ("measured", "met"),
+        [
+            ({"Glucose": 230}, ["Glucose >= 200"]),
+            ({"FastingGlucose": 131}, ["FastingGlucose >= 126"]),
+            ({"HbA1c": 6.7}, ["HbA1c >= 6.5"]),
+        ],
+    )
+    def test_diagnostic_values_are_reported_as_such_not_scored(
+        self, client, measured, met
+    ):
+        """Any ADA criterion is diabetes by definition: no risk score, whatever
+        the other measurements say, and the criterion to confirm is named."""
+        diabetic = {**PATIENT, **measured}
+        response = client.post("/inference", json={"instances": [diabetic, PATIENT]})
+
+        assert response.status_code == HTTP_OK
+        diagnosed, scored = response.json()["predictions"]
+        assert diagnosed["decision_basis"] == "diagnostic_criterion"
+        assert diagnosed["prediction"] == 1
+        assert diagnosed["probability"] is None
+        assert diagnosed["criteria_met"] == met
+        assert scored["decision_basis"] == "model"
+
+    def test_normal_fasting_glucose_and_hba1c_leave_the_model_in_charge(self, client):
+        normal = {**PATIENT, "FastingGlucose": 92, "HbA1c": 5.4}
+        (item,) = client.post("/inference", json={"instances": [normal]}).json()[
+            "predictions"
+        ]
+
+        assert item["decision_basis"] == "model"
+        assert item["probability"] is not None
+
+    def test_impaired_glucose_tolerance_is_flagged_whatever_the_risk(self, client):
+        """Young, lean and nulliparous, so the model alone would not flag her;
+        a 2-hour glucose of 145 mg/dL is prediabetes, and the guideline does."""
+        lean = {**PATIENT, "Glucose": 145, "BMI": 20.0, "Age": 21, "Pregnancies": 0}
+        (item,) = client.post("/inference", json={"instances": [lean]}).json()[
+            "predictions"
+        ]
+
+        assert item["prediction"] == 1
+        assert item["decision_basis"] == "impaired_glucose_tolerance"
+        assert item["probability"] is not None
 
     def test_empty_payload_is_rejected(self, client):
         response = client.post("/inference", json={"instances": []})
@@ -306,6 +398,15 @@ class TestDatasets:
 
         assert response.status_code == HTTP_OK
         assert response.json()["champion"] in ("baseline", "optimized")
+
+    def test_odds_ratios_describe_the_production_model(self, client):
+        response = client.get("/reports/odds_ratios")
+
+        assert response.status_code == HTTP_OK
+        body = response.json()
+        assert body["model"] in ("LogisticRegression", "RandomForestClassifier")
+        if body["odds_ratios"] is not None:
+            assert all(r["odds_ratio_per_unit"] > 0 for r in body["odds_ratios"])
 
     def test_threshold_curve_contains_the_configured_threshold(self, client):
         response = client.get("/reports/threshold_curve")

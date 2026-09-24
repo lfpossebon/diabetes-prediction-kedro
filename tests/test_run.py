@@ -11,8 +11,8 @@ from diabetes.pipeline_registry import register_pipelines
 
 EXPECTED_PIPELINES = {"data_engineering", "modelling", "refit", "inference"}
 
-# 11 data_engineering + 6 modelling + 10 refit + 8 inference
-EXPECTED_NODE_COUNT = 35
+# 11 data_engineering + 6 modelling + 11 refit + 10 inference
+EXPECTED_NODE_COUNT = 38
 
 PRODUCTION_ARTEFACTS = {
     "production_imputers",
@@ -80,3 +80,28 @@ class TestPipelineRegistry:
         assert "champion_model" in pipelines["modelling"].all_outputs()
         assert "champion_model" in refit_node.inputs
         assert "optimized_model" not in refit_node.inputs
+
+    def test_clinical_rules_read_the_input_as_received(self):
+        """The rules must see the values as measured, before imputation or
+        outlier capping could move them, and fasting glucose and HbA1c never
+        reach the cleaned table at all."""
+        pipelines = find_pipelines(raise_errors=True)
+        nodes = {n.name: n for n in pipelines["inference"].nodes}
+        referral = nodes["apply_guideline_referral"]
+        diagnosis = nodes["apply_diagnostic_criteria"]
+
+        assert "raw_inference_dataframe" in referral.inputs
+        assert "raw_inference_dataframe" in diagnosis.inputs
+        # The diagnosis comes last: it overrides a guideline referral.
+        assert referral.outputs[0] in diagnosis.inputs
+        assert diagnosis.outputs == ["inference_predictions"]
+
+    def test_threshold_analysis_compares_the_model_with_the_guideline(self):
+        pipelines = find_pipelines(raise_errors=True)
+        analysis = next(
+            n for n in pipelines["modelling"].nodes if n.name == "analyse_thresholds"
+        )
+
+        assert "params:guideline_referral" in analysis.inputs
+        # The measured, unimputed glucose, not the scaled one in the master table.
+        assert "split_diabetes_data" in analysis.inputs

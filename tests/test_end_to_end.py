@@ -69,8 +69,41 @@ def test_champion_is_chosen_with_the_real_parameters(catalog):
     assert report["split"] == catalog.load("params:champion_selection")["split"]
 
 
+def test_odds_ratios_describe_the_champion(catalog):
+    """production_model itself is an intermediate the runner has released, so
+    the champion report stands in for it."""
+    report = catalog.load("production_odds_ratios")
+    champion = catalog.load("champion_report")
+
+    assert report["model"] == champion["estimator"]
+    if champion["champion"] == "baseline":
+        features = catalog.load("params:modelling_baseline")["features"]
+        assert [r["feature"] for r in report["odds_ratios"]] == features
+
+
+def test_every_impaired_glucose_tolerance_is_flagged(catalog):
+    """The inference file comes from the same cohort: no 2-hour glucose >= 200,
+    and no fasting glucose or HbA1c, so no row meets a diagnostic criterion.
+    Every 2-hour glucose of 140-199 is flagged, by the model or the guideline."""
+    raw = pd.read_csv(
+        PROJECT_PATH / "data" / "01_raw" / "diabetes-dataset-inference.csv"
+    )
+    predictions = catalog.load("inference_predictions")
+
+    assert "diagnostic_criterion" not in {p["decision_basis"] for p in predictions}
+    impaired = raw["Glucose"].between(140, 199).to_numpy()
+    assert impaired.any()
+    assert all(p["prediction"] == 1 for p, igt in zip(predictions, impaired) if igt)
+
+
 def test_threshold_curve_reports_the_configured_cut_off(catalog):
     curve = catalog.load("threshold_curve")
     threshold = catalog.load("params:decision")["threshold"]
 
     assert curve["configured_threshold"]["threshold"] == pytest.approx(threshold)
+    served = curve["referral_strategies"]["model_or_guideline"]
+    assert served["sensitivity"] >= curve["configured_threshold"]["sensitivity"]
+    assert (
+        served["sensitivity"]
+        >= curve["referral_strategies"]["guideline"]["sensitivity"]
+    )

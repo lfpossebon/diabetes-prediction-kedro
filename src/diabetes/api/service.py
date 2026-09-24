@@ -67,6 +67,8 @@ ONLINE_MEMORY_DATASETS = (
     "featured_inference_data",
     "encoded_inference_data",
     "scaled_inference_data",
+    "model_predictions",
+    "referred_predictions",
     "inference_predictions",
 )
 
@@ -135,6 +137,7 @@ EXPOSED_DATASETS = frozenset(
         "optimized_metrics",
         "champion_report",
         "threshold_curve",
+        "production_odds_ratios",
     }
 )
 

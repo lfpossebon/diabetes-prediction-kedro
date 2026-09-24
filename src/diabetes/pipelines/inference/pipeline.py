@@ -1,8 +1,12 @@
 """Pipeline 'inference': score new data with the production artefacts.
 
 Transform only — the imputers, outlier caps, encoders, scalers and model all
-come from the refit pipeline. Six of the eight nodes are data_engineering
-functions reused as-is.
+come from the refit pipeline. Six of the ten nodes are data_engineering
+functions reused as-is. The last two apply the clinical rules around the
+model: a patient with impaired glucose tolerance is always referred, and one
+already meeting a diagnostic criterion is taken out of the model's hands.
+Both read the input as received, since fasting glucose and HbA1c never reach
+the cleaned table.
 """
 
 from kedro.pipeline import Node, Pipeline
@@ -16,7 +20,12 @@ from diabetes.pipelines.data_engineering.nodes import (
     transform_scalers,
 )
 
-from .nodes import predict, to_dataframe
+from .nodes import (
+    apply_diagnostic_criteria,
+    apply_guideline_referral,
+    predict,
+    to_dataframe,
+)
 
 
 def create_pipeline(**kwargs) -> Pipeline:
@@ -67,8 +76,28 @@ def create_pipeline(**kwargs) -> Pipeline:
             Node(
                 func=predict,
                 inputs=["production_model", "scaled_inference_data", "params:decision"],
-                outputs="inference_predictions",
+                outputs="model_predictions",
                 name="predict",
+            ),
+            Node(
+                func=apply_guideline_referral,
+                inputs=[
+                    "model_predictions",
+                    "raw_inference_dataframe",
+                    "params:guideline_referral",
+                ],
+                outputs="referred_predictions",
+                name="apply_guideline_referral",
+            ),
+            Node(
+                func=apply_diagnostic_criteria,
+                inputs=[
+                    "referred_predictions",
+                    "raw_inference_dataframe",
+                    "params:diagnostic_criteria",
+                ],
+                outputs="inference_predictions",
+                name="apply_diagnostic_criteria",
             ),
         ]
     )

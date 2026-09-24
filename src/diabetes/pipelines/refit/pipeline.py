@@ -24,7 +24,7 @@ from diabetes.pipelines.data_engineering.nodes import (
     transform_scalers,
 )
 
-from .nodes import refit_model
+from .nodes import refit_model, summarise_odds_ratios
 
 
 def create_pipeline(**kwargs) -> Pipeline:
@@ -106,6 +106,12 @@ def create_pipeline(**kwargs) -> Pipeline:
                 ],
                 outputs="production_model",
                 name="refit_model",
+            ),
+            Node(
+                func=summarise_odds_ratios,
+                inputs=["production_model", "production_scalers"],
+                outputs="production_odds_ratios",
+                name="summarise_odds_ratios",
             ),
         ]
     )

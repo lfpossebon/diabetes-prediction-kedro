@@ -1,10 +1,25 @@
 # Every column list, split proportion, threshold and hyperparameter lives here.
 # Changing the model, the grid or the feature set never requires touching src/.
+#
+# Clinical question: the risk that a non-diabetic woman aged 21-81, who has
+# just had a 75 g oral glucose tolerance test (OGTT), develops diabetes within
+# five years. Glucose and Insulin are 2-hour OGTT values, and the outcome is
+# the WHO criterion (2-hour glucose >= 200 mg/dL) met at a later examination
+# (Pima women, Arizona; Smith et al., 1988). That is why no training row
+# reaches 200: a woman already at 200 has the outcome, not a risk of it.
 
 # Column groups, referenced by group key throughout the pipelines.
 columns:
   target: Outcome
-  # The eight clinical measurements exactly as they arrive in the raw CSV.
+  # The clinical measurements the model may use, as named in the raw CSV.
+  # The CSV's DiabetesPedigreeFunction is left out on purpose: it is Smith et
+  # al.'s own formula over the ages and diabetes status of every relative, and
+  # no clinic computes it, so in practice it would always be the imputed
+  # median. Dropping it costs little: AUC 0.838 with it and 0.834 without in
+  # 20x repeated 5-fold CV on train + test, 0.824 and 0.806 on the 116 unseen
+  # patients, both gaps well inside the noise. Family history is a real risk
+  # factor, though: a yes/no "first-degree relative with diabetes", as in
+  # FINDRISC, is the clinical replacement once a cohort records it.
   raw:
     - Pregnancies
     - Glucose
@@ -12,7 +27,6 @@ columns:
     - SkinThickness
     - Insulin
     - BMI
-    - DiabetesPedigreeFunction
     - Age
   # A zero here is physiologically impossible: it is how the dataset encodes
   # "not measured". Pregnancies = 0 is a real value and stays out of this list.
@@ -27,9 +41,11 @@ columns:
   missing_indicator:
     - SkinThickness
     - Insulin
-  # Scaled with RobustScaler: the raw measurements plus the two interactions
-  # built by create_features. The model features are every master-table column
-  # (these, the one-hot categories and the missing flags).
+  # Scaled with RobustScaler. The notebook's GLUCOSE_X_INSULIN and
+  # GLUCOSE_X_PREGNANCIES interactions are gone: the first borrows the idea of
+  # HOMA-IR, which is defined on fasting values, not 2-hour ones, and for the
+  # ~48% of patients without insulin it was glucose times the imputed median;
+  # the second has no physiological rationale.
   numerical:
     - Pregnancies
     - Glucose
@@ -37,18 +53,17 @@ columns:
     - SkinThickness
     - Insulin
     - BMI
-    - DiabetesPedigreeFunction
     - Age
-    - GLUCOSE_X_INSULIN
-    - GLUCOSE_X_PREGNANCIES
   # Nominal categories built by create_features, all of them one-hot encoded.
+  # The notebook's NEW_INSULIN_SCORE is gone: its "Abnormal" class lumped
+  # low insulin (beta-cell failure) with high insulin (insulin resistance),
+  # two opposite states, and every unmeasured insulin was imputed as "Normal".
   categorical:
     - NEW_AGE_CAT
     - NEW_BMI
     - NEW_GLUCOSE
     - NEW_AGE_BMI_NOM
     - NEW_AGE_GLUCOSE_NOM
-    - NEW_INSULIN_SCORE
 
 split:
   train: 0.7
@@ -67,21 +82,23 @@ outliers:
   q3: 0.95
   iqr_factor: 1.5
 
-# Clinical cut-offs used by create_features. Upper bins are open-ended (1000),
-# so an out-of-range value sent to the API still lands in the last category.
+# Clinical cut-offs used by create_features. Every bin is left-closed, the
+# way the guidelines state them (">= 30", ">= 140"): a BMI of 25 is already
+# overweight and a glucose of 140 already impaired. Upper bins are open-ended
+# (1000), so an out-of-range value sent to the API still lands in the last one.
 feature_engineering:
   senior_age: 50
+  # WHO BMI classes, kg/m2.
   bmi:
-    bins: [0, 18.5, 24.9, 29.9, 1000]
+    bins: [0, 18.5, 25, 30, 1000]
     labels: [Underweight, Healthy, Overweight, Obese]
+  # WHO/ADA criteria for the 2-hour OGTT glucose, mg/dL: < 140 normal,
+  # 140-199 impaired glucose tolerance (a form of prediabetes), >= 200
+  # diabetes. The fasting cut-offs (100 / 126) do not apply to this
+  # measurement: at 2 hours, 126 mg/dL is a normal value.
   glucose:
     bins: [0, 140, 200, 1000]
     labels: [Normal, Prediabetes, Diabetes]
-  # Fasting glucose levels, left-closed: [0, 70) low, [70, 100) normal ...
-  glucose_level:
-    bins: [0, 70, 100, 126, 1000]
-    labels: [low, normal, hidden, high]
-  insulin_normal_range: [16, 166]
 
 # --- data engineering: fit on the train split only, to avoid leakage -------
 modelling_imputers:
@@ -102,17 +119,25 @@ modelling_scalers:
   split_to_fit: [train]
 
 # --- modelling -------------------------------------------------------------
+# The baseline is the parsimonious clinical model: a logistic regression on
+# four raw measurements, each an established risk factor a clinic records, and
+# none of the engineered features. Chosen by 20x repeated 5-fold CV on
+# train + test, with validate untouched: AUC 0.834, against 0.831 without
+# Pregnancies and 0.829 with all seven raw columns. Its coefficients are
+# published as odds ratios (08_reporting/production_odds_ratios.json).
 modelling_baseline:
   class_path: sklearn.linear_model.LogisticRegression
   target_column: Outcome
+  features: [Glucose, BMI, Age, Pregnancies]
   train_splits: [train]
   eval_splits: [train, test, validate]
   init_args:
     max_iter: 1000
 
-# The notebook's best model after tuning, with the notebook's grid. The search
-# runs on train + test; validate stays untouched for an honest final score.
-# Scoring test would only repeat an in-sample number, so it is left out.
+# The challenger: the notebook's best model after tuning, with the notebook's
+# grid, on every master-table column (no `features` key). The search runs on
+# train + test; validate stays untouched for an honest final score. Scoring
+# test would only repeat an in-sample number, so it is left out.
 modelling_optimization:
   class_path: sklearn.ensemble.RandomForestClassifier
   target_column: Outcome
@@ -134,30 +159,74 @@ evaluation:
   confidence: 0.95
   random_state: 42
 
-# The tuned model replaces the baseline only if it beats it on the untouched
-# validate split by more than min_improvement. A tie keeps the baseline:
+# The tuned challenger replaces the baseline only when it is better beyond the
+# noise of the untouched validate split: the lower bound of the paired-bootstrap
+# CI of the ROC AUC difference (challenger minus baseline, both scored on the
+# same resampled patients) must exceed min_improvement. On ~100 patients a
+# point gap of 0.03 is well inside the noise. Otherwise the baseline stays:
 # simpler, smaller and interpretable.
 champion_selection:
   split: validate
-  metric: roc_auc
   min_improvement: 0.0
+  n_bootstrap: 2000
+  confidence: 0.95
+  random_state: 42
 
-# Out-of-fold trade-off curve for the champion, written to
+# Out-of-fold decision analysis of the champion, written to
 # 08_reporting/threshold_curve.json: the evidence behind decision.threshold.
+# Each cut-off gets sensitivity, specificity, PPV, NPV and the decision-curve
+# net benefit (Vickers & Elkin, 2006), compared with flagging everyone. PPV
+# and NPV are also recomputed at lower prevalences: the ~35% of this sample is
+# far above what a general adult population would show, and PPV falls with it.
 threshold_analysis:
   cv: 5
   random_state: 42
-  thresholds: [0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6]
+  thresholds: [0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6]
+  reference_prevalences: [0.10, 0.05]
 
-# --- decision: the business cut-off, shared by evaluation and inference ----
-# A patient is flagged (prediction = 1) when P(diabetes) >= threshold.
-# Missing a diabetic patient costs far more than one extra blood test, so the
-# cut-off sits below the default 0.5. Chosen from out-of-fold predictions on
-# the modelling data only (08_reporting/threshold_curve.json): going from 0.5
-# to 0.35, recall rises from 0.55 to 0.81 while 45% of the patients, instead
-# of 29%, are sent to the confirmatory test.
+# --- clinical rules applied around the model --------------------------------
+# Impaired glucose tolerance (2-hour glucose 140-199 mg/dL) is prediabetes, and
+# the guidelines (ADA) already refer it to lifestyle prevention. The model adds
+# referrals among women with a normal 2-hour glucose, where half of the future
+# cases are, and never takes one away: an IGT woman below decision.threshold is
+# still flagged, with decision_basis "impaired_glucose_tolerance".
+guideline_referral:
+  column: Glucose
+  threshold: 140
+
+# Any one of these measured values is diabetes by the ADA criteria: the woman
+# already has the outcome the model forecasts. She is reported as meeting the
+# diagnostic criterion, with the criteria she met and no model probability.
+# The 2-hour glucose is the one in the training data (no row reaches 200);
+# fasting glucose and HbA1c are optional API fields, absent from the study CSV,
+# which catch a woman whose 2-hour value alone would still look non-diabetic.
+# The ADA asks for a second abnormal result before diagnosing an asymptomatic
+# patient, hence "confirm and treat", not "treat".
+diagnostic_criteria:
+  - column: Glucose         # 2-hour OGTT glucose, mg/dL
+    threshold: 200
+  - column: FastingGlucose  # mg/dL
+    threshold: 126
+  - column: HbA1c           # %
+    threshold: 6.5
+
+# --- decision: the clinical cut-off, shared by evaluation and inference ----
+# A patient is flagged (prediction = 1) when her 5-year risk >= threshold.
+# In decision-curve terms, a cut-off p says that finding one future diabetic
+# is worth (1 - p) / p unnecessary referrals: about 2.3 at 0.30. The referral
+# is to lifestyle prevention and a yearly glucose test, which is cheap and
+# safe, so one missed case outweighs a few extra referrals.
+# Out-of-fold on the champion's training rows (08_reporting/threshold_curve.json),
+# 0.30 gives sensitivity 0.79 and specificity 0.71 with 47% of the patients
+# flagged, and a net benefit of 0.196 against 0.072 for referring everyone and
+# 0.134 for the guideline rule alone (2-hour glucose >= 140: sensitivity 0.46).
+# The model beats referring everyone and referring no one at every cut-off
+# from 0.10 to 0.60. Adding the guideline referral (guideline_referral, below)
+# flags 0.5% more patients and misses none fewer on these rows: it costs
+# nothing, and it keeps the model from ever overruling the guideline. The earlier 0.35 was tuned to the random forest's
+# probabilities; on the logistic model it would drop sensitivity to 0.71.
 decision:
-  threshold: 0.35
+  threshold: 0.30
 
 # --- refit: same functions, every split, production artefacts --------------
 refit_imputers:

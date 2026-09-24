@@ -28,7 +28,7 @@ from diabetes import __version__ as release
 # -- Project information -----------------------------------------------------
 
 project = "diabetes"
-author = "Kedro"
+author = "Luiz Felipe Possebon"
 
 # The short X.Y version.
 version = re.match(r"^([0-9]+\.[0-9]+).*", release).group(1)

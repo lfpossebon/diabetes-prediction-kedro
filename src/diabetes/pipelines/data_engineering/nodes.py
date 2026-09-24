@@ -274,13 +274,18 @@ def transform_outlier_caps(
     return df_out
 
 
-def _cut(values: pd.Series, spec: dict[str, Any], right: bool = True) -> pd.Series:
-    """Bin a numeric series into string labels."""
+def _cut(values: pd.Series, spec: dict[str, Any]) -> pd.Series:
+    """Bin a numeric series into string labels, with left-closed bins.
+
+    Clinical cut-offs are stated as lower bounds ("BMI >= 30", "2-hour glucose
+    >= 140"), so each bin includes its left edge: ``[25, 30)`` is overweight
+    and 30 is already obese.
+    """
     return pd.cut(
         values,
         bins=spec["bins"],
         labels=spec["labels"],
-        right=right,
+        right=False,
         include_lowest=True,
     ).astype(str)
 
@@ -291,42 +296,38 @@ def create_features(
 ) -> pd.DataFrame:
     """Add the notebook's engineered features, computed row by row.
 
-    Two notebook bugs are fixed here:
+    Every glucose category uses the 2-hour OGTT cut-offs (140 / 200 mg/dL),
+    because that is what ``Glucose`` measures. The notebook built
+    ``NEW_AGE_GLUCOSE_NOM`` from fasting cut-offs (100 / 126), which called a
+    normal 2-hour value of 126 "high".
 
-    * ``NEW_AGE_BMI_NOM``: the notebook's obese rule used ``BMI > 18.5`` and
-      overwrote every other category. The BMI part now comes from the same
-      exclusive bins as ``NEW_BMI``.
-    * ``NEW_INSULIN_SCORE``: the notebook's ``set_insulin`` returned ``None``
-      for normal values. It is now ``"Normal"`` inside the range and
-      ``"Abnormal"`` outside it.
+    ``NEW_AGE_BMI_NOM`` fixes a notebook bug: its obese rule used
+    ``BMI > 18.5`` and overwrote every other category. The BMI part now comes
+    from the same exclusive bins as ``NEW_BMI``.
+
+    The notebook's ``NEW_INSULIN_SCORE`` and its ``GLUCOSE_X_INSULIN`` /
+    ``GLUCOSE_X_PREGNANCIES`` interactions are not built: none of them has a
+    physiological basis for 2-hour values (see ``columns`` in parameters.yml).
 
     Args:
         df_in: Imputed and capped DataFrame with the raw measurement columns.
-        params: Feature configuration with keys ``senior_age``, ``bmi``,
-            ``glucose``, ``glucose_level`` (each with ``bins`` and ``labels``)
-            and ``insulin_normal_range``.
+        params: Feature configuration with keys ``senior_age``, ``bmi`` and
+            ``glucose`` (the last two with ``bins`` and ``labels``).
 
     Returns:
-        DataFrame with the new ``NEW_*`` categorical columns and the
-        ``GLUCOSE_X_INSULIN`` / ``GLUCOSE_X_PREGNANCIES`` interactions.
+        DataFrame with the new ``NEW_*`` categorical columns.
     """
     df_out = df_in.copy()
 
     age_cat = np.where(df_out["Age"] >= params["senior_age"], "senior", "mature")
     bmi_cat = _cut(df_out["BMI"], params["bmi"])
-    glucose_level = _cut(df_out["Glucose"], params["glucose_level"], right=False)
-    low, high = params["insulin_normal_range"]
+    glucose_cat = _cut(df_out["Glucose"], params["glucose"])
 
     df_out["NEW_AGE_CAT"] = age_cat
     df_out["NEW_BMI"] = bmi_cat
-    df_out["NEW_GLUCOSE"] = _cut(df_out["Glucose"], params["glucose"])
+    df_out["NEW_GLUCOSE"] = glucose_cat
     df_out["NEW_AGE_BMI_NOM"] = bmi_cat.str.lower() + age_cat
-    df_out["NEW_AGE_GLUCOSE_NOM"] = glucose_level + age_cat
-    df_out["NEW_INSULIN_SCORE"] = np.where(
-        df_out["Insulin"].between(low, high), "Normal", "Abnormal"
-    )
-    df_out["GLUCOSE_X_INSULIN"] = df_out["Glucose"] * df_out["Insulin"]
-    df_out["GLUCOSE_X_PREGNANCIES"] = df_out["Glucose"] * df_out["Pregnancies"]
+    df_out["NEW_AGE_GLUCOSE_NOM"] = glucose_cat.str.lower() + age_cat
 
     logger.info("Created features: %d columns", len(df_out.columns))
     return df_out
@@ -339,8 +340,8 @@ def fit_encoders(
 ) -> dict[str, OneHotEncoder]:
     """Fit a OneHotEncoder for each categorical column on the specified splits.
 
-    The categories are nominal (``obesesenior``, ``hiddenmature`` ...), so an
-    integer code would hand the linear baseline an order that does not exist.
+    The categories are nominal (``obesesenior``, ``prediabetesmature`` ...), so
+    an integer code would hand a linear model an order that does not exist.
     One 0/1 column per category, as the notebook's ``get_dummies`` did.
 
     Only rows belonging to the splits in ``params["split_to_fit"]`` are used.

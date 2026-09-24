@@ -25,7 +25,6 @@ RAW = [
     "SkinThickness",
     "Insulin",
     "BMI",
-    "DiabetesPedigreeFunction",
     "Age",
 ]
 
@@ -41,18 +40,13 @@ COLUMNS = {
 FEATURES = {
     "senior_age": 50,
     "bmi": {
-        "bins": [0, 18.5, 24.9, 29.9, 1000],
+        "bins": [0, 18.5, 25, 30, 1000],
         "labels": ["Underweight", "Healthy", "Overweight", "Obese"],
     },
     "glucose": {
         "bins": [0, 140, 200, 1000],
         "labels": ["Normal", "Prediabetes", "Diabetes"],
     },
-    "glucose_level": {
-        "bins": [0, 70, 100, 126, 1000],
-        "labels": ["low", "normal", "hidden", "high"],
-    },
-    "insulin_normal_range": [16, 166],
 }
 
 OUTLIERS = {"q1": 0.05, "q3": 0.95, "iqr_factor": 1.5}
@@ -80,9 +74,12 @@ def raw_df() -> pd.DataFrame:
 
 class TestCleanData:
     def test_keeps_only_target_raw_columns_and_missing_flags(self, raw_df):
+        """A CSV column left out of ``raw`` is dropped: the pedigree function,
+        which no clinic can compute, never reaches the model."""
         out = clean_data(raw_df, COLUMNS)
 
         assert list(out.columns) == ["Outcome", *RAW, "INSULIN_MISSING"]
+        assert "DiabetesPedigreeFunction" not in out.columns
 
     def test_missing_flag_is_recorded_before_imputation(self, raw_df):
         """Insulin = 0 means "not measured"; the flag must keep that information."""
@@ -274,9 +271,9 @@ class TestCreateFeatures:
         assert out["NEW_BMI"].tolist() == ["Healthy", "Obese", "Overweight"]
         assert out["NEW_GLUCOSE"].tolist() == ["Normal", "Prediabetes", "Normal"]
         assert out["NEW_AGE_GLUCOSE_NOM"].tolist() == [
-            "lowmature",
-            "highsenior",
-            "hiddensenior",
+            "normalmature",
+            "prediabetessenior",
+            "normalsenior",
         ]
 
     def test_age_bmi_uses_exclusive_bmi_bins(self, clean_df):
@@ -289,17 +286,58 @@ class TestCreateFeatures:
             "overweightsenior",
         ]
 
-    def test_insulin_score_is_never_empty(self, clean_df):
-        """Regression: the notebook returned None for normal insulin values."""
+    def test_features_without_a_physiological_basis_are_not_built(self, clean_df):
+        """The insulin score and both interactions were dropped on clinical grounds."""
         out = create_features(clean_df, FEATURES)
 
-        assert out["NEW_INSULIN_SCORE"].tolist() == ["Abnormal", "Normal", "Abnormal"]
+        dropped = {"NEW_INSULIN_SCORE", "GLUCOSE_X_INSULIN", "GLUCOSE_X_PREGNANCIES"}
+        assert not dropped & set(out.columns)
 
-    def test_interactions(self, clean_df):
-        out = create_features(clean_df, FEATURES)
+    @pytest.mark.parametrize(
+        ("glucose", "expected"),
+        [
+            (139.9, "Normal"),
+            (140.0, "Prediabetes"),
+            (199.9, "Prediabetes"),
+            (200.0, "Diabetes"),
+        ],
+    )
+    def test_glucose_uses_the_2_hour_ogtt_cut_offs(self, glucose, expected):
+        """WHO/ADA: >= 140 is impaired glucose tolerance, >= 200 is diabetes."""
+        df = pd.DataFrame({"Glucose": [glucose], "BMI": [27.0], "Age": [30.0]})
 
-        assert out["GLUCOSE_X_INSULIN"].tolist() == [650.0, 15000.0, 22000.0]
-        assert out["GLUCOSE_X_PREGNANCIES"].tolist() == [130.0, 750.0, 0.0]
+        out = create_features(df, FEATURES)
+
+        assert out["NEW_GLUCOSE"].iloc[0] == expected
+        assert out["NEW_AGE_GLUCOSE_NOM"].iloc[0] == f"{expected.lower()}mature"
+
+    def test_126_is_a_normal_2_hour_glucose(self):
+        """Regression: fasting cut-offs labelled a normal 2-hour 126 mg/dL "high"."""
+        df = pd.DataFrame({"Glucose": [126.0], "BMI": [27.0], "Age": [30.0]})
+
+        out = create_features(df, FEATURES)
+
+        assert out["NEW_AGE_GLUCOSE_NOM"].iloc[0] == "normalmature"
+
+    @pytest.mark.parametrize(
+        ("bmi", "expected"),
+        [
+            (18.4, "Underweight"),
+            (18.5, "Healthy"),
+            (24.95, "Healthy"),
+            (25.0, "Overweight"),
+            (29.95, "Overweight"),
+            (30.0, "Obese"),
+        ],
+    )
+    def test_bmi_uses_the_who_classes(self, bmi, expected):
+        """Regression: the 24.9 / 29.9 edges put 24.95 in overweight and 29.95
+        in obese."""
+        df = pd.DataFrame({"Glucose": [100.0], "BMI": [bmi], "Age": [30.0]})
+
+        out = create_features(df, FEATURES)
+
+        assert out["NEW_BMI"].iloc[0] == expected
 
     def test_input_is_not_mutated(self, clean_df):
         before = clean_df.copy()
