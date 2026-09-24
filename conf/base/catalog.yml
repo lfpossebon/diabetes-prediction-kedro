@@ -160,54 +160,76 @@ scaled_inference_data:
 # No layer here on purpose: these fit artefacts are produced from one layer and
 # consumed to build another, so tagging them would make kedro-viz see a cycle
 # between layers and switch layer visualisation off.
+#
+# Every model artefact, prediction and report is versioned: each run saves to
+# <filepath>/<timestamp>/ and loads resolve to the latest one, so a retrain
+# never overwrites the model in service and any past version can be reloaded
+# with `kedro run --load-versions=production_model:<timestamp>`.
 modelling_imputers:
   type: pickle.PickleDataset
   filepath: data/06_models/modelling_imputers.pkl
+  versioned: true
 
 modelling_outlier_caps:
   type: pickle.PickleDataset
   filepath: data/06_models/modelling_outlier_caps.pkl
+  versioned: true
 
 modelling_encoders:
   type: pickle.PickleDataset
   filepath: data/06_models/modelling_encoders.pkl
+  versioned: true
 
 modelling_scalers:
   type: pickle.PickleDataset
   filepath: data/06_models/modelling_scalers.pkl
+  versioned: true
 
 baseline_model:
   type: pickle.PickleDataset
   filepath: data/06_models/baseline_model.pkl
+  versioned: true
 
 optimized_model:
   type: pickle.PickleDataset
   filepath: data/06_models/optimized_model.pkl
+  versioned: true
+
+champion_model:
+  type: pickle.PickleDataset
+  filepath: data/06_models/champion_model.pkl
+  versioned: true
 
 production_imputers:
   type: pickle.PickleDataset
   filepath: data/06_models/production_imputers.pkl
+  versioned: true
 
 production_outlier_caps:
   type: pickle.PickleDataset
   filepath: data/06_models/production_outlier_caps.pkl
+  versioned: true
 
 production_encoders:
   type: pickle.PickleDataset
   filepath: data/06_models/production_encoders.pkl
+  versioned: true
 
 production_scalers:
   type: pickle.PickleDataset
   filepath: data/06_models/production_scalers.pkl
+  versioned: true
 
 production_model:
   type: pickle.PickleDataset
   filepath: data/06_models/production_model.pkl
+  versioned: true
 
 # ------------------------------------- model output (07) & reporting (08)
 inference_predictions:
   type: json.JSONDataset
   filepath: data/07_model_output/inference_predictions.json
+  versioned: true
   metadata:
     kedro-viz:
       layer: model_output
@@ -215,6 +237,7 @@ inference_predictions:
 baseline_metrics:
   type: json.JSONDataset
   filepath: data/08_reporting/baseline_metrics.json
+  versioned: true
   metadata:
     kedro-viz:
       layer: reporting
@@ -222,6 +245,23 @@ baseline_metrics:
 optimized_metrics:
   type: json.JSONDataset
   filepath: data/08_reporting/optimized_metrics.json
+  versioned: true
+  metadata:
+    kedro-viz:
+      layer: reporting
+
+champion_report:
+  type: json.JSONDataset
+  filepath: data/08_reporting/champion_report.json
+  versioned: true
+  metadata:
+    kedro-viz:
+      layer: reporting
+
+threshold_curve:
+  type: json.JSONDataset
+  filepath: data/08_reporting/threshold_curve.json
+  versioned: true
   metadata:
     kedro-viz:
       layer: reporting

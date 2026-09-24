@@ -13,51 +13,53 @@ import logging
 from typing import Any
 
 import pandas as pd
+from sklearn.base import clone
+
+from diabetes.pipelines.modelling.nodes import SPLIT_COLUMN, feature_columns
 
 logger = logging.getLogger(__name__)
 
 
 def refit_model(
     master_table: pd.DataFrame,
-    columns: dict[str, Any],
-    optimized_model: dict[str, Any],
+    champion_model: dict[str, Any],
     params: dict[str, Any],
 ) -> dict[str, Any]:
-    """Retrain the optimized model on all data splits for production use.
+    """Retrain the champion model on all data splits for production use.
 
-    Extracts the estimator class and best hyperparameters from the
-    ``optimized_model`` artifact, then fits a fresh instance on the
-    splits specified in ``params["train_splits"]`` (typically all splits).
+    A fresh, unfitted clone of the champion's estimator — same class, same
+    hyperparameters — is fitted on the splits specified in
+    ``params["train_splits"]`` (typically all splits).
+
+    The feature columns are read from the *production* master table: its
+    one-hot columns come from the production encoders, which may know a
+    category the train-only encoders never saw.
 
     Args:
         master_table: Table processed with the *production* artefacts, with a
             ``split`` column and all feature and target columns.
-        columns: Column groups dictionary with ``numerical`` and
-            ``categorical`` keys defining the feature columns.
-        optimized_model: Model artifact produced by
-            ``optimize_hyperparameters``, containing a fitted ``estimator``
-            whose class and hyperparameters are reused.
+        champion_model: Model artifact chosen by ``select_champion``, whose
+            estimator class and hyperparameters are reused.
         params: Refit configuration with keys:
             - ``train_splits`` (list[str]): Split labels to train on.
 
     Returns:
         Production model artifact dict with keys ``estimator``,
-        ``target_column``, and ``feature_columns``.
+        ``target_column``, ``feature_columns`` and ``train_splits``.
     """
-    source_estimator = optimized_model["estimator"]
-    target = optimized_model["target_column"]
-    feature_cols = columns["numerical"] + columns["categorical"]
+    target = champion_model["target_column"]
+    feature_cols = feature_columns(master_table, target)
 
-    train_df = master_table[master_table["split"].isin(params["train_splits"])]
+    train_df = master_table[master_table[SPLIT_COLUMN].isin(params["train_splits"])]
     X_train = train_df[feature_cols]
     y_train = train_df[target]
 
-    estimator = type(source_estimator)(**source_estimator.get_params())
+    estimator = clone(champion_model["estimator"])
     estimator.fit(X_train, y_train)
 
     logger.info(
         "Refitted %s on %d samples (%d features) using all splits",
-        type(source_estimator).__name__,
+        type(estimator).__name__,
         len(X_train),
         X_train.shape[1],
     )
@@ -66,4 +68,5 @@ def refit_model(
         "estimator": estimator,
         "target_column": target,
         "feature_columns": feature_cols,
+        "train_splits": list(params["train_splits"]),
     }

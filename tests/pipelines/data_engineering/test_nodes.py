@@ -33,6 +33,7 @@ COLUMNS = {
     "target": "Outcome",
     "raw": RAW,
     "zero_as_missing": ["Glucose", "BloodPressure", "SkinThickness", "Insulin", "BMI"],
+    "missing_indicator": ["Insulin"],
     "numerical": ["Glucose", "BMI"],
     "categorical": ["NEW_BMI"],
 }
@@ -78,10 +79,21 @@ def raw_df() -> pd.DataFrame:
 
 
 class TestCleanData:
-    def test_keeps_only_target_and_raw_columns(self, raw_df):
+    def test_keeps_only_target_raw_columns_and_missing_flags(self, raw_df):
         out = clean_data(raw_df, COLUMNS)
 
-        assert list(out.columns) == ["Outcome", *RAW]
+        assert list(out.columns) == ["Outcome", *RAW, "INSULIN_MISSING"]
+
+    def test_missing_flag_is_recorded_before_imputation(self, raw_df):
+        """Insulin = 0 means "not measured"; the flag must keep that information."""
+        out = clean_data(raw_df, COLUMNS)
+
+        assert out["INSULIN_MISSING"].tolist() == [1, 1, 0]
+
+    def test_absent_column_is_flagged_missing(self, raw_df):
+        out = clean_data(raw_df.drop(columns=["Insulin"]), COLUMNS)
+
+        assert out["INSULIN_MISSING"].eq(1).all()
 
     def test_zeros_become_missing_only_where_configured(self, raw_df):
         out = clean_data(raw_df, COLUMNS)
@@ -128,6 +140,29 @@ class TestAddSplitColumn:
         second = add_split_column(df, split)
 
         pd.testing.assert_series_equal(first["split"], second["split"])
+
+    def test_stratified_splits_keep_the_class_balance(self):
+        n_rows, n_positive = 200, 60
+        df = pd.DataFrame({"Outcome": [1] * n_positive + [0] * (n_rows - n_positive)})
+        split = {
+            "train": 0.7,
+            "test": 0.15,
+            "validate": 0.15,
+            "random_state": 42,
+            "stratify_by": "Outcome",
+        }
+
+        out = add_split_column(df, split)
+
+        prevalence = out.groupby("split")["Outcome"].mean()
+        assert prevalence.to_dict() == pytest.approx(
+            {"train": 0.3, "test": 0.3, "validate": 0.3}, abs=0.01
+        )
+        assert out["split"].value_counts().to_dict() == {
+            "train": 140,
+            "test": 30,
+            "validate": 30,
+        }
 
 
 @pytest.fixture
@@ -181,7 +216,21 @@ class TestFitTransformSeparation:
         assert out["Glucose"].max() == pytest.approx(upper)
         assert out["Glucose"].min() >= lower
 
-    def test_unseen_category_is_encoded_as_minus_one(self, split_df):
+    def test_categories_become_one_indicator_column_each(self, split_df):
+        """Nominal categories must not be given an order: one 0/1 column each."""
+        encoders = fit_encoders(
+            split_df, COLUMNS, {"columns": ["categorical"], "split_to_fit": ["train"]}
+        )
+
+        out = transform_encoders(split_df, encoders)
+
+        dummies = ["NEW_BMI_Healthy", "NEW_BMI_Obese", "NEW_BMI_Overweight"]
+        assert "NEW_BMI" not in out.columns
+        assert [c for c in out.columns if c.startswith("NEW_BMI_")] == dummies
+        assert out.loc[0, dummies].tolist() == [1, 0, 0]
+        assert out[dummies].dtypes.map(lambda t: t.kind in "iu").all()
+
+    def test_unseen_category_is_all_zeros(self, split_df):
         """'Underweight' exists only in the test split, so the encoder must not know it."""
         encoders = fit_encoders(
             split_df, COLUMNS, {"columns": ["categorical"], "split_to_fit": ["train"]}
@@ -190,8 +239,7 @@ class TestFitTransformSeparation:
         out = transform_encoders(split_df, encoders)
 
         assert "Underweight" not in set(encoders["NEW_BMI"].categories_[0])
-        assert out["NEW_BMI"].iloc[4] == -1
-        assert out["NEW_BMI"].dtype.kind in "iu"
+        assert out.filter(like="NEW_BMI_").iloc[4].eq(0).all()
 
     def test_scaler_statistics_come_from_the_train_split_only(self, split_df):
         filled = split_df.fillna(110.0)

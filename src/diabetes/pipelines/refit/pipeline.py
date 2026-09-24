@@ -101,8 +101,7 @@ def create_pipeline(**kwargs) -> Pipeline:
                 func=refit_model,
                 inputs=[
                     "production_master_table",
-                    "params:columns",
-                    "optimized_model",
+                    "champion_model",
                     "params:refit_model",
                 ],
                 outputs="production_model",

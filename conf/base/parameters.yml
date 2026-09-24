@@ -22,8 +22,14 @@ columns:
     - SkinThickness
     - Insulin
     - BMI
-  # Model features. The raw measurements plus the two interactions built by
-  # create_features, all of them scaled.
+  # Missing so often that the gap itself carries information (Insulin ~48%,
+  # SkinThickness ~29%): each gets a 0/1 <COL>_MISSING flag before imputation.
+  missing_indicator:
+    - SkinThickness
+    - Insulin
+  # Scaled with RobustScaler: the raw measurements plus the two interactions
+  # built by create_features. The model features are every master-table column
+  # (these, the one-hot categories and the missing flags).
   numerical:
     - Pregnancies
     - Glucose
@@ -35,7 +41,7 @@ columns:
     - Age
     - GLUCOSE_X_INSULIN
     - GLUCOSE_X_PREGNANCIES
-  # Categories built by create_features, all of them ordinal-encoded.
+  # Nominal categories built by create_features, all of them one-hot encoded.
   categorical:
     - NEW_AGE_CAT
     - NEW_BMI
@@ -49,8 +55,13 @@ split:
   test: 0.15
   validate: 0.15
   random_state: 42
+  # Every split keeps the dataset's diabetes prevalence (~35%).
+  stratify_by: Outcome
 
 # Outlier thresholds: the notebook's wide IQR, (q95 - q05) * 1.5 beyond each quantile.
+# Kept for parity with the notebook, but on this data it is almost a no-op: the
+# lower limits are negative and only a handful of Insulin values reach the upper
+# one. Tighter caps (q1: 0.25, q3: 0.75) are a one-line change here.
 outliers:
   q1: 0.05
   q3: 0.95
@@ -101,11 +112,12 @@ modelling_baseline:
 
 # The notebook's best model after tuning, with the notebook's grid. The search
 # runs on train + test; validate stays untouched for an honest final score.
+# Scoring test would only repeat an in-sample number, so it is left out.
 modelling_optimization:
   class_path: sklearn.ensemble.RandomForestClassifier
   target_column: Outcome
   train_splits: [train, test]
-  eval_splits: [train, test, validate]
+  eval_splits: [train, validate]
   init_args:
     random_state: 46
   cv: 5
@@ -116,12 +128,34 @@ modelling_optimization:
     max_depth: [null, 5, 10]
     min_samples_split: [2, 5, 10]
 
+# Bootstrap confidence interval reported next to every ROC AUC.
+evaluation:
+  n_bootstrap: 1000
+  confidence: 0.95
+  random_state: 42
+
+# The tuned model replaces the baseline only if it beats it on the untouched
+# validate split by more than min_improvement. A tie keeps the baseline:
+# simpler, smaller and interpretable.
+champion_selection:
+  split: validate
+  metric: roc_auc
+  min_improvement: 0.0
+
+# Out-of-fold trade-off curve for the champion, written to
+# 08_reporting/threshold_curve.json: the evidence behind decision.threshold.
+threshold_analysis:
+  cv: 5
+  random_state: 42
+  thresholds: [0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6]
+
 # --- decision: the business cut-off, shared by evaluation and inference ----
 # A patient is flagged (prediction = 1) when P(diabetes) >= threshold.
 # Missing a diabetic patient costs far more than one extra blood test, so the
 # cut-off sits below the default 0.5. Chosen from out-of-fold predictions on
-# the modelling data only: at 0.35 recall rises from 0.64 to 0.81 while about
-# half of the patients (46%) are sent to the confirmatory test.
+# the modelling data only (08_reporting/threshold_curve.json): going from 0.5
+# to 0.35, recall rises from 0.55 to 0.81 while 45% of the patients, instead
+# of 29%, are sent to the confirmatory test.
 decision:
   threshold: 0.35
 

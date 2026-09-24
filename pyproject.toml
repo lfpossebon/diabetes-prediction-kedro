@@ -3,7 +3,7 @@ requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
 
 [project]
-requires-python = ">=3.10"
+requires-python = ">=3.11"  # datetime.UTC (api/service.py)
 name = "diabetes"
 readme = "README.md"
 dynamic = ["version"]
@@ -13,6 +13,8 @@ dependencies = [
     "scikit-learn>=1.7.2",
     "fastapi>=0.141.1",
     "uvicorn[standard]>=0.53.0",
+    "pandas>=3.0",
+    "numpy>=2.4",
 ]
 
 [project.scripts]
@@ -95,3 +97,6 @@ dev = [
     "pytest-mock>=1.7.1,<2.0",
     "ruff~=0.12.0",
 ]
+
+[tool.kedro_telemetry]
+project_id = "2c56139909ab4de380e5763c0ed16c9e"

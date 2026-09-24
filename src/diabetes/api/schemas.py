@@ -1,13 +1,14 @@
 """Pydantic contracts for the API.
 
-These validate types and shapes only — no business rules. Keeping them here
-means the request/response contract is readable in one place, and FastAPI
-turns them into the OpenAPI docs served at /docs for free.
+These validate types, shapes and plausible ranges — the business rules stay
+in the pipelines. Keeping them here means the request/response contract is
+readable in one place, and FastAPI turns them into the OpenAPI docs served at
+/docs for free.
 """
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class HealthResponse(BaseModel):
@@ -19,13 +20,50 @@ class HealthResponse(BaseModel):
     )
 
 
+class Patient(BaseModel):
+    """One patient, with the raw column names of the training CSV.
+
+    Glucose, BMI and Age are required: they are the model's strongest signals,
+    and without them the score would be little more than the imputed median
+    patient — who sits above the decision threshold and would be flagged.
+    The other measurements may be omitted, sent as ``null`` or, as in the
+    training data, as ``0`` to mean "not measured"; they are then imputed.
+
+    Unknown fields are rejected, so a typo such as ``glucose`` fails loudly
+    instead of being silently imputed.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    Pregnancies: int | None = Field(default=None, ge=0, le=20)
+    Glucose: float = Field(gt=0, le=600, description="2-hour plasma glucose, mg/dL.")
+    BloodPressure: float | None = Field(
+        default=None, ge=0, le=250, description="Diastolic, mm Hg. 0 = not measured."
+    )
+    SkinThickness: float | None = Field(
+        default=None,
+        ge=0,
+        le=100,
+        description="Triceps skinfold, mm. 0 = not measured.",
+    )
+    Insulin: float | None = Field(
+        default=None,
+        ge=0,
+        le=1000,
+        description="2-hour serum insulin, mu U/ml. 0 = not measured.",
+    )
+    BMI: float = Field(gt=0, le=90, description="kg/m².")
+    DiabetesPedigreeFunction: float | None = Field(default=None, ge=0, le=3)
+    Age: int = Field(
+        ge=21, le=120, description="Years. The training population is 21 or older."
+    )
+
+
 class InferenceRequest(BaseModel):
-    instances: list[dict[str, Any]] = Field(
+    instances: list[Patient] = Field(
         min_length=1,
-        description="One object per patient, using the raw column names "
-        "(Pregnancies, Glucose, BloodPressure, SkinThickness, Insulin, BMI, "
-        "DiabetesPedigreeFunction, Age). Unknown columns are ignored; missing "
-        "ones, and zeros in the clinical measurements, are imputed.",
+        description="One object per patient. Out-of-range values, unknown "
+        "fields and a missing Glucose, BMI or Age are rejected with 422.",
         examples=[
             [
                 {
@@ -70,9 +108,16 @@ class ConfusionMatrix(BaseModel):
 class SplitMetrics(BaseModel):
     """One split of ``baseline_metrics`` / ``optimized_metrics``."""
 
+    in_sample: bool = Field(
+        description="True when the model was fitted on this split: a training "
+        "score, not a holdout one."
+    )
     threshold: float = Field(description="decision.threshold used for the labels.")
     accuracy: float
     roc_auc: float
+    roc_auc_ci: list[float] = Field(
+        description="Bootstrap confidence interval for roc_auc, [low, high]."
+    )
     f1_macro: float
     recall: float
     precision: float

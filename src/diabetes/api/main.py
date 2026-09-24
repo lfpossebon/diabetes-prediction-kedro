@@ -10,7 +10,7 @@ this file.
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Literal
+from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException, status
 
@@ -25,6 +25,8 @@ from .schemas import (
     SplitMetrics,
 )
 from .service import (
+    ArtefactsMissingError,
+    RunInProgressError,
     ensure_bootstrap,
     get_run,
     predict_online,
@@ -73,8 +75,14 @@ def create_app() -> FastAPI:
         tags=["training"],
     )
     def train() -> RunStartedResponse:
-        """Start data_engineering -> modelling -> refit and return a run id."""
-        return RunStartedResponse(**start_training())
+        """Start data_engineering -> modelling -> refit and return a run id.
+
+        Refused with 409 while another training run is still going.
+        """
+        try:
+            return RunStartedResponse(**start_training())
+        except RunInProgressError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.get("/train/{run_id}", response_model=RunStatusResponse, tags=["training"])
     def train_status(run_id: str) -> RunStatusResponse:
@@ -86,16 +94,18 @@ def create_app() -> FastAPI:
     @app.post("/inference", response_model=InferenceResponse, tags=["inference"])
     def inference(request: InferenceRequest) -> InferenceResponse:
         """Score records synchronously, without writing anything to disk."""
-        if not production_artefacts_available():
-            raise HTTPException(
-                status_code=409,
-                detail="Production artefacts are missing. Run POST /train first.",
-            )
+        instances = [patient.model_dump() for patient in request.instances]
         try:
-            predictions = predict_online(request.instances)
+            predictions = predict_online(instances)
+        except ArtefactsMissingError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         except Exception as exc:
+            # The traceback goes to the server log only: exception text can
+            # carry file paths and library internals the client has no use for.
             logger.exception("online inference failed")
-            raise HTTPException(status_code=500, detail=str(exc)) from exc
+            raise HTTPException(
+                status_code=500, detail="Online inference failed; see server logs."
+            ) from exc
 
         return InferenceResponse(n=len(predictions), predictions=predictions)
 
@@ -107,7 +117,10 @@ def create_app() -> FastAPI:
     )
     def batch_inference() -> RunStartedResponse:
         """Score the inference file declared in the catalog, in the background."""
-        return RunStartedResponse(**start_batch_inference())
+        try:
+            return RunStartedResponse(**start_batch_inference())
+        except RunInProgressError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.get("/predictions", response_model=InferenceResponse, tags=["datasets"])
     def predictions() -> InferenceResponse:
@@ -132,6 +145,18 @@ def create_app() -> FastAPI:
             raise HTTPException(
                 status_code=404,
                 detail="No metrics yet. Run POST /train first.",
+            )
+        return data
+
+    @app.get("/reports/{report}", response_model=dict[str, Any], tags=["datasets"])
+    def reports(report: Literal["champion", "threshold_curve"]) -> dict[str, Any]:
+        """Serve the model-selection report or the out-of-fold threshold curve."""
+        name = "champion_report" if report == "champion" else report
+        data = read_dataset(name)
+        if data is None:
+            raise HTTPException(
+                status_code=404,
+                detail="No reports yet. Run POST /train first.",
             )
         return data
 

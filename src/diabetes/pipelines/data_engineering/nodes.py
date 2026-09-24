@@ -17,7 +17,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-from sklearn.preprocessing import OrdinalEncoder, RobustScaler
+from sklearn.preprocessing import OneHotEncoder, RobustScaler
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +58,11 @@ def clean_data(
     SkinThickness, Insulin or BMI is stored as ``0``. Those zeros become NaN
     here so the imputer can fill them later.
 
+    Columns listed in ``missing_indicator`` also get a 0/1 ``<COL>_MISSING``
+    flag, recorded *before* imputation erases the information. Insulin is
+    missing for about half of the patients, so the median imputation alone
+    would make them indistinguishable from patients measured at the median.
+
     Raw columns absent from the input are added as NaN (and imputed later),
     so an API request with a missing field is still scored. The target is kept
     only if present, which lets the same function serve training data and
@@ -69,9 +74,12 @@ def clean_data(
             - ``target`` (str): Target column name.
             - ``raw`` (list[str]): Raw measurement column names.
             - ``zero_as_missing`` (list[str]): Columns where 0 means missing.
+            - ``missing_indicator`` (list[str], optional): Columns that get a
+              ``<COL>_MISSING`` flag.
 
     Returns:
-        DataFrame with the target (if present) followed by the raw columns.
+        DataFrame with the target (if present), the raw columns and the
+        missing-value flags.
     """
     target = columns["target"]
     keep = ([target] if target in raw_data.columns else []) + columns["raw"]
@@ -83,6 +91,9 @@ def clean_data(
 
     zero_cols = columns["zero_as_missing"]
     df_out[zero_cols] = df_out[zero_cols].mask(df_out[zero_cols] == 0)
+
+    for c in columns.get("missing_indicator", []):
+        df_out[f"{c.upper()}_MISSING"] = df_out[c].isna().astype(int)
 
     logger.info(
         "Cleaned data: %d rows, %d columns, %d missing values",
@@ -100,6 +111,11 @@ def add_split_column(
 ) -> pd.DataFrame:
     """Randomly assign each row to a train, test, or validate split.
 
+    With ``stratify_by`` set, the proportions are applied inside each class,
+    so every split keeps the dataset's diabetes prevalence. On ~100-row
+    holdouts, an unstratified draw can shift it by several points and move
+    the metrics with it.
+
     Args:
         df_in: Cleaned input DataFrame.
         split: Split configuration with keys:
@@ -107,6 +123,8 @@ def add_split_column(
             - ``test`` (float): Proportion of rows for testing.
             - ``validate`` (float): Proportion of rows for validation.
             - ``random_state`` (int): Seed for reproducible assignment.
+            - ``stratify_by`` (str, optional): Column whose class balance
+              every split must preserve.
 
     Returns:
         Input DataFrame with an added ``split`` column whose values are
@@ -116,19 +134,26 @@ def add_split_column(
         ValueError: If ``train + test + validate`` does not sum to 1.0.
     """
     total = split["train"] + split["test"] + split["validate"]
-    probs = [split["train"], split["test"], split["validate"]]
 
     if not np.isclose(total, 1.0):
         raise ValueError(f"Split proportions must sum to 1.0, got {total}")
 
     rng = np.random.default_rng(split["random_state"])
-
-    labels = rng.choice(
-        a=["train", "test", "validate"],
-        size=len(df_in),
-        p=probs,
-        replace=True,
+    stratify_by = split.get("stratify_by")
+    strata = (
+        df_in.groupby(stratify_by).indices.values()
+        if stratify_by
+        else [np.arange(len(df_in))]
     )
+
+    labels = np.empty(len(df_in), dtype=object)
+    for positions in strata:
+        shuffled = rng.permutation(positions)
+        n_train = round(len(shuffled) * split["train"])
+        n_test = round(len(shuffled) * split["test"])
+        labels[shuffled[:n_train]] = "train"
+        labels[shuffled[n_train : n_train + n_test]] = "test"
+        labels[shuffled[n_train + n_test :]] = "validate"
 
     df_out = df_in.assign(split=labels)
 
@@ -311,11 +336,15 @@ def fit_encoders(
     df_in: pd.DataFrame,
     columns: dict[str, Any],
     params: dict[str, Any],
-) -> dict[str, OrdinalEncoder]:
-    """Fit an OrdinalEncoder for each categorical column on the specified splits.
+) -> dict[str, OneHotEncoder]:
+    """Fit a OneHotEncoder for each categorical column on the specified splits.
+
+    The categories are nominal (``obesesenior``, ``hiddenmature`` ...), so an
+    integer code would hand the linear baseline an order that does not exist.
+    One 0/1 column per category, as the notebook's ``get_dummies`` did.
 
     Only rows belonging to the splits in ``params["split_to_fit"]`` are used.
-    A category never seen during fitting is encoded as ``-1`` instead of
+    A category never seen during fitting becomes all zeros instead of
     raising, so an unusual API request is still scored.
 
     Args:
@@ -326,41 +355,46 @@ def fit_encoders(
             - ``split_to_fit`` (list[str]): Split labels used for fitting.
 
     Returns:
-        Mapping of column names to their fitted ``OrdinalEncoder`` instances.
+        Mapping of column names to their fitted ``OneHotEncoder`` instances.
     """
     fit_df = _fitting_rows(df_in, params["split_to_fit"])
-    encoders: dict[str, OrdinalEncoder] = {}
+    encoders: dict[str, OneHotEncoder] = {}
 
     for col in _expand_column_groups(columns, params["columns"]):
-        encoder = OrdinalEncoder(handle_unknown="use_encoded_value", unknown_value=-1)
+        encoder = OneHotEncoder(handle_unknown="ignore", sparse_output=False, dtype=int)
         encoder.fit(fit_df[[col]].astype(str))
         encoders[col] = encoder
 
-    logger.info("Fitted ordinal encoders for %d columns", len(encoders))
+    logger.info("Fitted one-hot encoders for %d columns", len(encoders))
     return encoders
 
 
 def transform_encoders(
     df_in: pd.DataFrame,
-    encoders: dict[str, OrdinalEncoder],
+    encoders: dict[str, OneHotEncoder],
 ) -> pd.DataFrame:
-    """Apply fitted encoders to replace categorical columns with integer codes.
+    """Replace each categorical column with one 0/1 column per fitted category.
 
     Args:
         df_in: DataFrame containing the columns to encode.
-        encoders: Mapping of column names to fitted ``OrdinalEncoder`` instances.
+        encoders: Mapping of column names to fitted ``OneHotEncoder`` instances.
 
     Returns:
-        DataFrame with each encoded column replaced by its integer codes.
+        DataFrame where each encoded column ``C`` is replaced by ``C_<category>``
+        indicator columns.
     """
-    df_out = df_in.copy()
+    encoded = [
+        pd.DataFrame(
+            encoder.transform(df_in[[col]].astype(str)),
+            columns=encoder.get_feature_names_out(),
+            index=df_in.index,
+        )
+        for col, encoder in encoders.items()
+        if col in df_in.columns
+    ]
+    present = [col for col in encoders if col in df_in.columns]
 
-    for col, encoder in encoders.items():
-        if col in df_out.columns:
-            codes = encoder.transform(df_out[[col]].astype(str))
-            df_out[col] = codes.ravel().astype(int)
-
-    return df_out
+    return pd.concat([df_in.drop(columns=present), *encoded], axis=1)
 
 
 def fit_scalers(

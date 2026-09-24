@@ -7,8 +7,9 @@
 FROM python:3.14-slim
 
 # uv is a static Rust binary: copy it from the official image rather than
-# pip-installing it.
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
+# pip-installing it. Pinned, like the dependencies in uv.lock: `latest` would
+# let the same Dockerfile build differently from one day to the next.
+COPY --from=ghcr.io/astral-sh/uv:0.12.13 /uv /uvx /usr/local/bin/
 
 # Pre-compile .py to .pyc at install time for a faster cold start.
 ENV UV_COMPILE_BYTECODE=1
@@ -33,8 +34,13 @@ EXPOSE 8000
 # matches the host's, the pipelines lose write access to it. Fixing that
 # properly means passing --user $(id -u):$(id -g) at run time.
 
+# The venv built above, used directly. `uv run` would re-sync the environment
+# on every start, *including* the dev group (jupyterlab, kedro-viz, pytest...):
+# a download at each cold start, and a crash on a host without internet.
+ENV PATH="/app/.venv/bin:$PATH"
+
 # Exec form: uvicorn becomes PID 1 and receives signals directly, so
 # `docker compose down` stops it cleanly instead of timing out.
 # --host 0.0.0.0 is mandatory: binding to localhost would be unreachable from
 # outside the container's network namespace.
-CMD ["uv", "run", "uvicorn", "diabetes.api:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "diabetes.api:app", "--host", "0.0.0.0", "--port", "8000"]

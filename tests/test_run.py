@@ -11,8 +11,8 @@ from diabetes.pipeline_registry import register_pipelines
 
 EXPECTED_PIPELINES = {"data_engineering", "modelling", "refit", "inference"}
 
-# 11 data_engineering + 4 modelling + 10 refit + 8 inference
-EXPECTED_NODE_COUNT = 33
+# 11 data_engineering + 6 modelling + 10 refit + 8 inference
+EXPECTED_NODE_COUNT = 35
 
 PRODUCTION_ARTEFACTS = {
     "production_imputers",
@@ -67,3 +67,16 @@ class TestPipelineRegistry:
 
         assert "production_master_table" in refit_node.inputs
         assert "master_table" not in refit_node.inputs
+
+    def test_refit_promotes_the_champion_not_a_fixed_model(self):
+        """Regression: refit always took optimized_model, whatever the metrics said."""
+        pipelines = find_pipelines(raise_errors=True)
+        refit_node = next(
+            n for n in pipelines["refit"].nodes if n.name == "refit_model"
+        )
+
+        # all_outputs(): analyse_thresholds also consumes the champion inside
+        # modelling, so outputs() alone would hide it.
+        assert "champion_model" in pipelines["modelling"].all_outputs()
+        assert "champion_model" in refit_node.inputs
+        assert "optimized_model" not in refit_node.inputs

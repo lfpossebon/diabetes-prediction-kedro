@@ -11,8 +11,16 @@ Three scopes, three lifetimes (the rule the API is built around):
 
 Sharing a session across requests would mean sharing one catalog: the overrides
 below would leak into the next /train, and concurrent writes would corrupt it.
+
+The production artefacts on disk are shared, though, so one lock guards them:
+the refit and batch-inference runs hold it while they write or read them, and
+online inference holds it only while it loads them into memory. A request can
+therefore never score with new imputers and an old model, or read a pickle
+that is still being written. The lock is per process: it does not cover a
+`kedro run` launched from a shell while the API is serving.
 """
 
+import contextlib
 import logging
 import threading
 import uuid
@@ -36,13 +44,17 @@ PACKAGE_NAME = "diabetes"
 TRAINING_PIPELINES = ("data_engineering", "modelling", "refit")
 BATCH_INFERENCE_PIPELINES = ("inference",)
 
-PRODUCTION_ARTEFACTS = (
-    "production_model.pkl",
-    "production_imputers.pkl",
-    "production_outlier_caps.pkl",
-    "production_encoders.pkl",
-    "production_scalers.pkl",
+# Catalog datasets the inference pipeline loads — and the refit pipeline writes.
+PRODUCTION_DATASETS = (
+    "production_imputers",
+    "production_outlier_caps",
+    "production_encoders",
+    "production_scalers",
+    "production_model",
 )
+
+# Pipelines that write or read PRODUCTION_DATASETS, and must hold the lock.
+ARTEFACT_PIPELINES = frozenset({"refit", "inference"})
 
 # Every dataset the inference pipeline would otherwise persist. They are
 # CSVDatasets pointing at fixed paths, so two concurrent requests would write
@@ -65,6 +77,16 @@ _bootstrap_lock = threading.Lock()
 # Shared mutable state -> always behind its lock.
 _runs: dict[str, dict[str, Any]] = {}
 _runs_lock = threading.Lock()
+
+_artefacts_lock = threading.Lock()
+
+
+class RunInProgressError(RuntimeError):
+    """A run of the same kind is still going; starting another would race it."""
+
+
+class ArtefactsMissingError(RuntimeError):
+    """The refit pipeline has not produced the production artefacts yet."""
 
 
 def _now() -> str:
@@ -91,9 +113,15 @@ def ensure_bootstrap() -> None:
 
 
 def production_artefacts_available() -> bool:
-    """Whether the refit pipeline has already produced what /inference needs."""
-    models_dir = PROJECT_PATH / "data" / "06_models"
-    return all((models_dir / name).exists() for name in PRODUCTION_ARTEFACTS)
+    """Whether the refit pipeline has already produced what /inference needs.
+
+    Asked of the catalog, not of the file system, so it keeps working when
+    ``catalog.yml`` versions the artefacts or moves them to object storage.
+    """
+    ensure_bootstrap()
+    with KedroSession.create(project_path=PROJECT_PATH) as session:
+        catalog = session.load_context().catalog
+        return all(catalog.exists(name) for name in PRODUCTION_DATASETS)
 
 
 # ------------------------------------------------------- read-only datasets
@@ -101,7 +129,13 @@ def production_artefacts_available() -> bool:
 # Catalog datasets the API may serve. A whitelist, never the catalog as a
 # whole: it also holds pickled models and intermediate patient-level tables.
 EXPOSED_DATASETS = frozenset(
-    {"inference_predictions", "baseline_metrics", "optimized_metrics"}
+    {
+        "inference_predictions",
+        "baseline_metrics",
+        "optimized_metrics",
+        "champion_report",
+        "threshold_curve",
+    }
 )
 
 
@@ -127,8 +161,23 @@ def read_dataset(name: str) -> Any | None:
 
 
 def _register_run(kind: str, pipeline_names: tuple[str, ...]) -> str:
+    """Record a new run, refusing it while another run of the same kind is active.
+
+    Check and insert happen under one lock acquisition, so two requests
+    arriving together cannot both pass the check.
+    """
     run_id = uuid.uuid4().hex[:12]
     with _runs_lock:
+        active = next(
+            (
+                r["run_id"]
+                for r in _runs.values()
+                if r["kind"] == kind and r["status"] == "running"
+            ),
+            None,
+        )
+        if active is not None:
+            raise RunInProgressError(f"A {kind} run is already in progress: {active}")
         _runs[run_id] = {
             "run_id": run_id,
             "kind": kind,
@@ -170,7 +219,12 @@ def _run_pipelines(run_id: str, pipeline_names: tuple[str, ...]) -> None:
     try:
         ensure_bootstrap()
         for name in pipeline_names:
-            with KedroSession.create(project_path=PROJECT_PATH) as session:
+            guard = (
+                _artefacts_lock
+                if name in ARTEFACT_PIPELINES
+                else contextlib.nullcontext()
+            )
+            with guard, KedroSession.create(project_path=PROJECT_PATH) as session:
                 session.run(pipeline_name=name)
             logger.info("run %s: pipeline '%s' completed", run_id, name)
     except Exception as exc:  # noqa: BLE001 - recorded in the run registry
@@ -185,6 +239,9 @@ def _start_background(kind: str, pipeline_names: tuple[str, ...]) -> dict[str, A
 
     Deliberately not a thread-pool worker: those exist to serve short requests,
     and a grid search would occupy one for minutes.
+
+    Raises:
+        RunInProgressError: If a run of the same kind has not finished yet.
     """
     ensure_bootstrap()
     run_id = _register_run(kind, pipeline_names)
@@ -217,13 +274,30 @@ def predict_online(instances: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
     The request payload is injected into the catalog as a MemoryDataset and the
     outputs are captured the same way, so the *same* inference pipeline that
-    reads a CSV in batch mode runs here unchanged. Only the production
-    artefacts are still loaded from disk — which is exactly what we want.
+    reads a CSV in batch mode runs here unchanged.
+
+    The production artefacts are loaded from the catalog up front, all under
+    the artefacts lock, and injected as MemoryDatasets: the five of them come
+    from one consistent refit even if a /train finishes mid-request, and the
+    lock is held for a few milliseconds rather than the whole run.
+
+    Raises:
+        ArtefactsMissingError: If the refit pipeline has not run yet.
     """
     ensure_bootstrap()
 
     with KedroSession.create(project_path=PROJECT_PATH) as session:
         catalog = session.load_context().catalog
+
+        with _artefacts_lock:
+            if not all(catalog.exists(name) for name in PRODUCTION_DATASETS):
+                raise ArtefactsMissingError(
+                    "Production artefacts are missing. Run POST /train first."
+                )
+            for name in PRODUCTION_DATASETS:
+                catalog[name] = MemoryDataset(
+                    data=catalog.load(name), copy_mode="assign"
+                )
 
         catalog["raw_inference_data"] = MemoryDataset(data=pd.DataFrame(instances))
         for name in ONLINE_MEMORY_DATASETS:
